@@ -239,9 +239,25 @@ func (gm *GasMonitor) monitorChainRPC(ctx context.Context, chain config.ChainCon
 	}
 }
 
+
+var (
+	lastLowBalanceAlert = make(map[string]time.Time)
+	lastBalanceCheck    = make(map[string]time.Time)
+	lowBalanceAlertCooldown = 1 * time.Hour   
+	balanceCheckCooldown   = 1 * time.Hour  
+)
+
 // monitorGasBalance exports a metric indicating the current gas balance of the relayer signer and whether it is below alerting thresholds
 func monitorGasBalance(ctx context.Context, chainID string, chainClient cctp.BridgeClient) error {
+	// Check if we should skip the balance check
+	lastCheck, exists := lastBalanceCheck[chainID]
+	if exists && time.Since(lastCheck) < balanceCheckCooldown {
+		return nil // Skip checking balance during cooldown period
+	}
+	
 	balance, err := chainClient.SignerGasTokenBalance(ctx)
+	lastBalanceCheck[chainID] = time.Now() // Update last check time
+	
 	if err != nil {
 		lmt.Logger(ctx).Error("failed to get gas token balance", zap.Error(err), zap.String("chain_id", chainID))
 		return err
