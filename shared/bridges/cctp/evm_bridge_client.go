@@ -29,6 +29,7 @@ type EVMClient interface {
 
 	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
 	Close()
+	SubscribeNewHead(ctx context.Context, ch chan<- *types.Header) (ethereum.Subscription, error)
 }
 
 type EVMBridgeClient struct {
@@ -302,4 +303,49 @@ func (c *EVMBridgeClient) QueryOrderSubmittedEvent(ctx context.Context, gatewayC
 	}
 
 	return order, nil
+}
+
+func (c *EVMBridgeClient) SubscribeNewHeads(ctx context.Context) (Subscription, error) {
+	// Try WebSocket subscription if the client supports it
+	if wsClient, ok := c.client.(interface {
+		SubscribeNewHead(ctx context.Context, ch chan<- *types.Header) (ethereum.Subscription, error)
+	}); ok {
+		headsCh := make(chan *types.Header)
+		sub, err := wsClient.SubscribeNewHead(ctx, headsCh)
+		if err != nil {
+			return nil, fmt.Errorf("failed to subscribe to new heads: %w", err)
+		}
+
+		return &EVMSubscription{
+			sub:     sub,
+			headsCh: headsCh,
+		}, nil
+	}
+
+	// If client doesn't support WebSocket, return a specific error
+	return nil, fmt.Errorf("websocket subscriptions not supported by this client")
+}
+
+type EVMSubscription struct {
+	sub     ethereum.Subscription
+	headsCh chan *types.Header
+}
+
+func (s *EVMSubscription) Data() <-chan interface{} {
+	dataCh := make(chan interface{})
+	go func() {
+		for header := range s.headsCh {
+			dataCh <- header
+		}
+	}()
+	return dataCh
+}
+
+func (s *EVMSubscription) Err() <-chan error {
+	return s.sub.Err()
+}
+
+func (s *EVMSubscription) Unsubscribe() {
+	s.sub.Unsubscribe()
+	close(s.headsCh)
 }

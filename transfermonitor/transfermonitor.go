@@ -12,6 +12,7 @@ import (
 	"cosmossdk.io/math"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	ethereumrpc "github.com/ethereum/go-ethereum/rpc"
 	dbtypes "github.com/skip-mev/go-fast-solver/db"
@@ -39,23 +40,27 @@ type MonitorDBQueries interface {
 type TransferMonitor struct {
 	db            MonitorDBQueries
 	clients       map[string]*ethclient.Client
+	wsClients     map[string]*ethereumrpc.Client
 	tmRPCManager  tmrpc.TendermintRPCClientManager
 	quickStart    bool
-	didQuickStart map[string]bool // Track which chains have been quick-started
+	didQuickStart map[string]bool
 	ticker        *time.Ticker
+	useWebSocket  bool
 }
 
-func NewTransferMonitor(db MonitorDBQueries, quickStart bool, pollInterval *time.Duration) *TransferMonitor {
+func NewTransferMonitor(db MonitorDBQueries, quickStart bool, pollInterval *time.Duration, useWebSocket bool) *TransferMonitor {
 	if pollInterval == nil {
 		pollInterval = &[]time.Duration{5 * time.Second}[0]
 	}
 	return &TransferMonitor{
 		db:            db,
 		clients:       make(map[string]*ethclient.Client),
+		wsClients:     make(map[string]*ethereumrpc.Client),
 		tmRPCManager:  tmrpc.NewTendermintRPCClientManager(),
 		quickStart:    quickStart,
 		didQuickStart: make(map[string]bool),
 		ticker:        time.NewTicker(*pollInterval),
+		useWebSocket:  useWebSocket,
 	}
 }
 
@@ -70,6 +75,21 @@ func (t *TransferMonitor) Start(ctx context.Context) error {
 		if chain.FastTransferContractAddress != "" {
 			chains = append(chains, chain)
 		}
+	}
+
+	if t.useWebSocket {
+		eg, ctx := errgroup.WithContext(ctx)
+		for _, chain := range chains {
+			chain := chain
+			eg.Go(func() error {
+				return t.startWebSocketMonitor(ctx, chain)
+			})
+		}
+		go func() {
+			if err := eg.Wait(); err != nil {
+				lmt.Logger(ctx).Error("WebSocket monitor error", zap.Error(err))
+			}
+		}()
 	}
 
 	for {
@@ -379,4 +399,181 @@ func (t *TransferMonitor) getLatestBlockHeight(ctx context.Context, chain config
 	default:
 		return 0, fmt.Errorf("unsupported chain type: %s", chain.Type)
 	}
+}
+
+func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain config.ChainConfig) error {
+	chainID, err := getChainID(chain)
+	if err != nil {
+		return fmt.Errorf("error getting chain id: %w", err)
+	}
+
+	wsEndpoint, err := config.GetConfigReader(ctx).GetWSEndpoint(chain.ChainID)
+	if err != nil {
+		return fmt.Errorf("error getting websocket endpoint: %w", err)
+	}
+
+	lmt.Logger(ctx).Info("Initializing WebSocket connection",
+		zap.String("chain_id", chainID),
+		zap.String("ws_endpoint", wsEndpoint))
+
+	wsClient, err := t.getWebSocketClient(ctx, chain)
+	if err != nil {
+		if strings.Contains(err.Error(), "dial tcp") || 
+		   strings.Contains(err.Error(), "not supported") {
+			// Add metrics alongside existing logging
+			metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
+			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "connection_failed")
+			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
+
+			lmt.Logger(ctx).Info("WebSocket connection failed, falling back to RPC polling",
+				zap.String("chain_id", chainID),
+				zap.String("chain_name", chain.ChainName),
+				zap.Error(err))
+			
+			return nil
+		}
+		return fmt.Errorf("error getting websocket client: %w", err)
+	}
+
+	headers := make(chan *types.Header)
+	sub, err := wsClient.EthSubscribe(ctx, headers, "newHeads")
+	if err != nil {
+		// Add metrics alongside existing logging
+		metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
+		metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "subscription_failed")
+		metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+			metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
+
+		lmt.Logger(ctx).Info("WebSocket subscription failed, falling back to RPC polling",
+			zap.String("chain_id", chainID),
+			zap.String("chain_name", chain.ChainName),
+			zap.Error(err))
+		return nil
+	}
+
+	// Add metric for successful connection
+	metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeWebSocket)
+
+	lmt.Logger(ctx).Info("Successfully established WebSocket connection",
+		zap.String("chain_id", chainID),
+		zap.String("chain_name", chain.ChainName))
+
+	var lastProcessedHeight uint64
+	transferMonitorMetadata, err := t.db.GetTransferMonitorMetadata(ctx, chainID)
+	if err == nil {
+		lastProcessedHeight = uint64(transferMonitorMetadata.HeightLastSeen)
+	}
+
+	blockCount := 0
+	for {
+		select {
+		case err := <-sub.Err():
+			// Add metrics alongside existing logging
+			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "subscription_error")
+			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
+
+			return fmt.Errorf("subscription error: %w", err)
+		case header := <-headers:
+			if header.Number.Uint64() <= lastProcessedHeight {
+				continue
+			}
+
+			blockCount++
+			metrics.FromContext(ctx).IncrementBlocksReceived(chainID, "transfer_monitor")
+
+			orders, endBlockHeight, err := t.findNewTransferIntentsOnEVMChain(ctx, chain, lastProcessedHeight+1)
+			if err != nil {
+				lmt.Logger(ctx).Error("Error finding transfer intents", zap.Error(err))
+				continue
+			}
+
+			if len(orders) > 0 {
+				lmt.Logger(ctx).Info("Found transfer intents via WebSocket",
+					zap.Int("count", len(orders)),
+					zap.String("chain_id", chainID))
+
+				errorInsertingOrder := false
+				for _, order := range orders {
+					toInsert := db.InsertOrderParams{
+						SourceChainID:                     order.ChainID,
+						DestinationChainID:                order.DestinationChainID,
+						SourceChainGatewayContractAddress: order.ChainID,
+						Sender:                            order.OrderEvent.Sender[:],
+						Recipient:                         order.OrderEvent.Recipient[:],
+						AmountIn:                          order.OrderEvent.AmountIn.String(),
+						AmountOut:                         order.OrderEvent.AmountOut.String(),
+						Nonce:                             int64(order.OrderEvent.Nonce),
+						OrderCreationTx:                   order.TxHash,
+						OrderCreationTxBlockHeight:        int64(order.TxBlockHeight),
+						OrderID:                           order.OrderID,
+						OrderStatus:                       dbtypes.OrderStatusPending,
+						TimeoutTimestamp:                  time.Unix(order.TimeoutTimestamp, 0).UTC(),
+					}
+					if len(order.OrderEvent.Data) > 0 {
+						toInsert.Data = sql.NullString{String: hex.EncodeToString(order.OrderEvent.Data), Valid: true}
+					}
+
+					_, err := t.db.InsertOrder(ctx, toInsert)
+					if err != nil && !strings.Contains(err.Error(), "sql: no rows in result set") {
+
+						lmt.Logger(ctx).Error("Error inserting order", zap.Error(err))
+						errorInsertingOrder = true
+						break
+					}
+					metrics.FromContext(ctx).IncFillOrderStatusChange(order.ChainID, order.DestinationChainID, dbtypes.OrderStatusPending)
+				}
+				if errorInsertingOrder {
+					continue
+				}
+			}
+
+			_, err = t.db.InsertTransferMonitorMetadata(ctx, db.InsertTransferMonitorMetadataParams{
+				ChainID:        chainID,
+				HeightLastSeen: int64(endBlockHeight),
+			})
+			if err != nil {
+				lmt.Logger(ctx).Error("Error inserting transfer monitor metadata", zap.Error(err))
+				continue
+			}
+
+			lastProcessedHeight = endBlockHeight
+
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (t *TransferMonitor) getWebSocketClient(ctx context.Context, chain config.ChainConfig) (*ethereumrpc.Client, error) {
+	wsEndpoint, err := config.GetConfigReader(ctx).GetWSEndpoint(chain.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	
+	lmt.Logger(ctx).Info("Initializing WebSocket connection",
+		zap.String("chain_id", chain.ChainID),
+		zap.String("ws_endpoint", wsEndpoint))
+	
+	if client, ok := t.wsClients[chain.ChainID]; ok {
+		return client, nil
+	}
+
+	basicAuth, err := config.GetConfigReader(ctx).GetBasicAuth(chain.ChainID)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := ethereumrpc.DialContext(ctx, wsEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	if basicAuth != nil {
+		client.SetHeader("Authorization", fmt.Sprintf("Basic %s", *basicAuth))
+	}
+
+	t.wsClients[chain.ChainID] = client
+	return client, nil
 }
