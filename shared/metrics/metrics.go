@@ -27,7 +27,7 @@ const (
 
 	// Connection types
 	ConnectionTypeWebSocket = "websocket"
-	ConnectionTypeRPC      = "rpc"
+	ConnectionTypeRPC       = "rpc"
 )
 
 type Metrics interface {
@@ -54,6 +54,7 @@ type Metrics interface {
 	SetGasBalance(chainID, chainName, gasTokenSymbol string, gasBalance, warningThreshold, criticalThreshold big.Int, gasTokenDecimals uint8)
 
 	IncExcessiveOrderFulfillmentLatency(sourceChainID, destinationChainID, orderStatus string)
+	IncExcessiveOrderSettlementLatency(sourceChainID, destinationChainID, settlementStatus string)
 	IncExcessiveHyperlaneRelayLatency(sourceChainID, destinationChainID string)
 
 	SetConnectionType(chainID, monitor, connType string)
@@ -88,6 +89,7 @@ type PromMetrics struct {
 
 	orderSettlementStatusChange      metrics.Counter
 	settlementLatency                metrics.Histogram
+	excessiveOrderSettlementLatency  metrics.Counter
 	excessiveOrderFulfillmentLatency metrics.Counter
 
 	fundRebalanceTransferStatusChange metrics.Counter
@@ -107,7 +109,7 @@ type PromMetrics struct {
 
 	// New WebSocket metrics using go-kit metrics types
 	connectionType     metrics.Gauge
-	blocksReceived    metrics.Counter
+	blocksReceived     metrics.Counter
 	subscriptionErrors metrics.Counter
 	connectionSwitches metrics.Counter
 }
@@ -124,7 +126,12 @@ func NewPromMetrics() Metrics {
 			Name:      "excessive_order_fulfillment_latency_counter",
 			Help:      "number of observations of excessive order fulfillment latency, paginated by source and destination chain and status",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, orderStatusLabel}),
-		orderSettlementStatusChange: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		excessiveOrderSettlementLatency: prom.NewCounterFrom(stdprom.CounterOpts{
+			Namespace: "solver",
+			Name:      "excessive_order_settlement_latency_counter",
+			Help:      "number of observations of excessive order settlement latency, paginated by source and destination chain and status",
+		}, []string{sourceChainIDLabel, destinationChainIDLabel, settlementStatusLabel}),
+		orderSettlementStatusChange: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "order_settlement_status_change_counter",
 			Help:      "numbers of order settlement status changes, paginated by source and destination chain, and status",
@@ -146,15 +153,15 @@ func NewPromMetrics() Metrics {
 		}, []string{successLabel, chainIDLabel}),
 		fillLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
-			Name:      "latency_per_fill_minutes",
-			Help:      "latency from source transaction to fill completion, paginated by source and destination chain id (in minutes)",
-			Buckets:   []float64{5, 15, 30, 60, 120, 180},
+			Name:      "latency_per_fill_seconds",
+			Help:      "latency from source transaction to fill completion, paginated by source and destination chain id (in seconds)",
+			Buckets:   []float64{1, 5, 10, 15, 20, 30, 40, 50, 60, 120, 300, 600},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, orderStatusLabel}),
 		settlementLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "latency_per_settlement_minutes",
 			Help:      "latency from source transaction to fill completion, paginated by source and destination chain id (in minutes)",
-			Buckets:   []float64{5, 15, 30, 60, 120, 180},
+			Buckets:   []float64{1, 5, 15, 30, 60, 120, 180, 240, 300},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, settlementStatusLabel}),
 		hplMessageStatusChange: kitprom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
@@ -170,8 +177,8 @@ func NewPromMetrics() Metrics {
 		hplLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "latency_per_hyperlane_message_seconds",
-				Help:      "latency for hyperlane message relaying, paginated by status, source and destination chain id (in seconds)",
-			Buckets:   []float64{30, 60, 300, 600, 900, 1200, 1500, 1800, 2400, 3000, 3600},
+			Help:      "latency for hyperlane message relaying, paginated by status, source and destination chain id (in seconds)",
+			Buckets:   []float64{1, 5, 10, 15, 20, 30, 40, 50, 60, 120, 300, 600},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, transferStatusLabel}),
 		hplRelayTooExpensive: kitprom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
@@ -208,7 +215,7 @@ func NewPromMetrics() Metrics {
 		insufficientBalanceErrors: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "insufficient_balance_errors",
-				Help:      "histogram of fill orders that exceeded available balance",
+			Help:      "histogram of fill orders that exceeded available balance",
 			Buckets: []float64{
 				100000000,     // 100 USDC
 				1000000000,    // 1,000 USDC
@@ -266,7 +273,7 @@ func (m *PromMetrics) IncTransactionVerified(success bool, chainID string) {
 }
 
 func (m *PromMetrics) ObserveFillLatency(sourceChainID, destinationChainID, orderStatus string, latency time.Duration) {
-	m.fillLatency.With(sourceChainIDLabel, sourceChainID, destinationChainIDLabel, destinationChainID, orderStatusLabel, orderStatus).Observe(latency.Minutes())
+	m.fillLatency.With(sourceChainIDLabel, sourceChainID, destinationChainIDLabel, destinationChainID, orderStatusLabel, orderStatus).Observe(latency.Seconds())
 }
 
 func (m *PromMetrics) ObserveSettlementLatency(sourceChainID, destinationChainID, settlementStatus string, latency time.Duration) {
@@ -347,6 +354,14 @@ func (m *PromMetrics) IncExcessiveOrderFulfillmentLatency(sourceChainID, destina
 	).Add(1)
 }
 
+func (m *PromMetrics) IncExcessiveOrderSettlementLatency(sourceChainID, destinationChainID, settlementStatus string) {
+	m.excessiveOrderSettlementLatency.With(
+		sourceChainIDLabel, sourceChainID,
+		destinationChainIDLabel, destinationChainID,
+		settlementStatusLabel, settlementStatus,
+	).Add(1)
+}
+
 func (m *PromMetrics) IncExcessiveHyperlaneRelayLatency(sourceChainID, destinationChainID string) {
 	m.excessiveHyperlaneRelayLatency.With(
 		sourceChainIDLabel, sourceChainID,
@@ -378,6 +393,8 @@ type NoOpMetrics struct{}
 
 func (n NoOpMetrics) IncExcessiveOrderFulfillmentLatency(sourceChainID, destinationChainID, orderStatus string) {
 }
+func (n NoOpMetrics) IncExcessiveOrderSettlementLatency(sourceChainID, destinationChainID, settlementStatus string) {
+}
 func (n NoOpMetrics) IncExcessiveHyperlaneRelayLatency(sourceChainID, destinationChainID string) {
 }
 func (n NoOpMetrics) IncHyperlaneRelayTooExpensive(sourceChainID, destinationChainID string) {
@@ -407,10 +424,10 @@ func (n NoOpMetrics) ObserveTransferSizeOutOfRange(sourceChainID, destinationCha
 func (n *NoOpMetrics) SetGasBalance(chainID, chainName, gasTokenSymbol string, gasBalance, warningThreshold, criticalThreshold big.Int, gasTokenDecimals uint8) {
 }
 func (n NoOpMetrics) ObserveFeeBpsRejection(sourceChainID, destinationChainID string, feeBps int64) {}
-func (n NoOpMetrics) SetConnectionType(chainID, monitor, connType string)                {}
-func (n NoOpMetrics) IncrementBlocksReceived(chainID, monitor string)                    {}
-func (n NoOpMetrics) RecordSubscriptionError(chainID, monitor, errorType string)         {}
-func (n NoOpMetrics) RecordConnectionSwitch(chainID, monitor, fromType, toType string)   {}
+func (n NoOpMetrics) SetConnectionType(chainID, monitor, connType string)                           {}
+func (n NoOpMetrics) IncrementBlocksReceived(chainID, monitor string)                               {}
+func (n NoOpMetrics) RecordSubscriptionError(chainID, monitor, errorType string)                    {}
+func (n NoOpMetrics) RecordConnectionSwitch(chainID, monitor, fromType, toType string)              {}
 func NewNoOpMetrics() Metrics {
 	return &NoOpMetrics{}
 }

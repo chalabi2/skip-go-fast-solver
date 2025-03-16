@@ -12,6 +12,7 @@ import (
 	mock_skipgo "github.com/skip-mev/go-fast-solver/mocks/shared/clients/skipgo"
 	mock_config "github.com/skip-mev/go-fast-solver/mocks/shared/config"
 	mock_evmrpc "github.com/skip-mev/go-fast-solver/mocks/shared/evmrpc"
+	mock_oracle "github.com/skip-mev/go-fast-solver/mocks/shared/oracle"
 	evm2 "github.com/skip-mev/go-fast-solver/mocks/shared/txexecutor/evm"
 	"github.com/skip-mev/go-fast-solver/shared/clients/skipgo"
 	"github.com/skip-mev/go-fast-solver/shared/config"
@@ -172,11 +173,11 @@ func TestFundRebalancer_RebalanceWithAbandonedTransfer(t *testing.T) {
 	mockEVMClientManager := mock_evmrpc.NewMockEVMRPCClientManager(t)
 	mockEVMClient := mock_evmrpc.NewMockEVMChainRPC(t)
 	mockEVMClient.EXPECT().SuggestGasPrice(mockContext).Return(big.NewInt(10000), nil)
-	mockEVMClientManager.EXPECT().GetClient(ctx, arbitrumChainID).Return(mockEVMClient, nil)
+	mockEVMClientManager.EXPECT().GetClient(mock.Anything, arbitrumChainID).Return(mockEVMClient, nil)
 	fakeDatabase := mock_database.NewFakeDatabase()
 	mockEVMTxExecutor := evm2.NewMockEVMTxExecutor(t)
-	mockTxPriceOracle := mock_evmrpc.NewMockOracle(t)
-	mockTxPriceOracle.On("TxFeeUUSDC", ctx, mock.Anything, mock.Anything).Return(big.NewInt(75), nil)
+	mockTxPriceOracle := mock_oracle.NewMockTxPriceOracle(t)
+	mockTxPriceOracle.On("TxFeeUUSDC", mock.Anything, mock.Anything, mock.Anything).Return(big.NewInt(75), nil)
 	keystore, err := keys.LoadKeyStoreFromPlaintextFile(f.Name())
 	assert.NoError(t, err)
 
@@ -194,24 +195,46 @@ func TestFundRebalancer_RebalanceWithAbandonedTransfer(t *testing.T) {
 	err = fakeDatabase.UpdateTransferCreatedAt(ctx, oldTransferID, time.Now().Add(-2*transferTimeout))
 	assert.NoError(t, err)
 
-	mockSkipGo.EXPECT().Balance(ctx, osmosisChainID, osmosisAddress, osmosisUSDCDenom).Return("0", nil)
+	mockSkipGo.EXPECT().Balance(mock.Anything, &skipgo.BalancesRequest{
+		Chains: map[string]skipgo.ChainRequest{
+			osmosisChainID: {
+				Address: osmosisAddress,
+				Denoms:  []string{osmosisUSDCDenom},
+			},
+		},
+	}).Return(&skipgo.BalancesResponse{
+		Chains: map[string]skipgo.ChainResponse{
+			osmosisChainID: {
+				Address: osmosisAddress,
+				Denoms: map[string]skipgo.DenomDetail{
+					osmosisUSDCDenom: {
+						Amount:          "0",
+						Decimals:        6,
+						FormattedAmount: "0",
+						Price:           "1.0",
+						ValueUSD:        "0",
+					},
+				},
+			},
+		},
+	}, nil)
 
-	mockEVMClient.EXPECT().GetUSDCBalance(ctx, arbitrumUSDCDenom, arbitrumAddress).Return(big.NewInt(1000), nil)
+	mockEVMClient.EXPECT().GetUSDCBalance(mock.Anything, arbitrumUSDCDenom, arbitrumAddress).Return(big.NewInt(1000), nil)
 
 	route := &skipgo.RouteResponse{
 		AmountOut:              strconv.Itoa(osmosisTargetAmount),
 		Operations:             []any{"opts"},
 		RequiredChainAddresses: []string{arbitrumChainID, osmosisChainID},
 	}
-	mockSkipGo.EXPECT().Route(ctx, arbitrumUSDCDenom, arbitrumChainID, osmosisUSDCDenom, osmosisChainID, big.NewInt(osmosisTargetAmount)).
+	mockSkipGo.EXPECT().Route(mock.Anything, arbitrumUSDCDenom, arbitrumChainID, osmosisUSDCDenom, osmosisChainID, big.NewInt(osmosisTargetAmount)).
 		Return(route, nil)
 
 	txs := []skipgo.Tx{{EVMTx: &skipgo.EVMTx{ChainID: arbitrumChainID, To: osmosisAddress, Value: "999", SignerAddress: arbitrumAddress}}}
-	mockSkipGo.EXPECT().Msgs(ctx, arbitrumUSDCDenom, arbitrumChainID, arbitrumAddress, osmosisUSDCDenom, osmosisChainID, osmosisAddress, big.NewInt(osmosisTargetAmount), big.NewInt(osmosisTargetAmount), []string{arbitrumAddress, osmosisAddress}, route.Operations).
+	mockSkipGo.EXPECT().Msgs(mock.Anything, arbitrumUSDCDenom, arbitrumChainID, arbitrumAddress, osmosisUSDCDenom, osmosisChainID, osmosisAddress, big.NewInt(osmosisTargetAmount), big.NewInt(osmosisTargetAmount), []string{arbitrumAddress, osmosisAddress}, route.Operations).
 		Return(txs, nil)
 
 	mockEVMClient.On("EstimateGas", mock.Anything, mock.Anything).Return(uint64(100), nil)
-	mockEVMTxExecutor.On("ExecuteTx", ctx, arbitrumChainID, arbitrumAddress, []byte{}, "999", osmosisAddress, mock.Anything).Return("new_hash", nil)
+	mockEVMTxExecutor.On("ExecuteTx", mock.Anything, arbitrumChainID, arbitrumAddress, []byte{}, "999", osmosisAddress, mock.Anything).Return("new_hash", "", nil)
 
 	// Rebalancer sees the pending transfer and doesn't create a new one
 	rebalancer.Rebalance(ctx)

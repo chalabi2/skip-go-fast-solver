@@ -75,9 +75,9 @@ chains:
     chain_id: "1"
     type: "evm"
     environment: "mainnet"
-    gas_token_symbol: "ethereum"
+    gas_token_symbol: "ETH"
     gas_token_decimals: 18
-    gas_token_coingecko_id: "ETH"
+    gas_token_coingecko_id: "ethereum"
     hyperlane_domain: "1"
     fast_transfer_contract_address: 0xe7935104c9670015b21c6300e5b95d2f75474cda
     quick_start_num_blocks_back: 300000
@@ -117,6 +117,7 @@ chains:
     min_fee_bps: 10
     batch_uusdc_settle_up_threshold: <settle_up_threshold> # 1/2 of destination inventory evenly distributed across source chains
     min_profit_margin_bps: 8
+    settlement_rebatch_timeout: 1h
     evm:
       rpc: <avalanche_rpc_server_url>
       rpc_basic_auth_var: <env_var_with_server_password>
@@ -146,6 +147,7 @@ chains:
     min_fee_bps: 10
     batch_uusdc_settle_up_threshold: <settle_up_threshold> # 1/2 of destination inventory evenly distributed across source chains
     min_profit_margin_bps: 8
+    settlement_rebatch_timeout: 1h
     evm:
       rpc: <optimism_rpc_server_url>
       rpc_basic_auth_var: <env_var_with_server_password>
@@ -175,6 +177,7 @@ chains:
     min_fee_bps: 10
     batch_uusdc_settle_up_threshold: <settle_up_threshold> # 1/2 of destination inventory evenly distributed across source chains
     min_profit_margin_bps: 8
+    settlement_rebatch_timeout: 1h
     evm:
       rpc: <arbitrum_rpc_server_url> # e.g. "https://arb1.arbitrum.io/rpc"
       rpc_basic_auth_var: <env_var_with_server_password>
@@ -238,6 +241,7 @@ chains:
     min_fee_bps: 10
     batch_uusdc_settle_up_threshold: <settle_up_threshold> # 1/2 of destination inventory evenly distributed across source chains
     min_profit_margin_bps: 8
+    settlement_rebatch_timeout: 1h
     evm:
       rpc: <base_mainnet_rpc_server_url> # e.g. "https://mainnet.base.org"
       rpc_basic_auth_var: <env_var_with_server_password>
@@ -267,6 +271,7 @@ chains:
     min_fee_bps: 10
     batch_uusdc_settle_up_threshold: <settle_up_threshold> # 1/2 of destination inventory evenly distributed across source chains
     min_profit_margin_bps: 8
+    settlement_rebatch_timeout: 1h
     evm:
       rpc: <polygon_mainnet_rpc_server_url> # e.g. "https://polygon-rpc.com"
       rpc_basic_auth_var: <env_var_with_server_password>

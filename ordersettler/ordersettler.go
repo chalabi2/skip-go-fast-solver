@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	dbtypes "github.com/skip-mev/go-fast-solver/db"
 	"github.com/skip-mev/go-fast-solver/ordersettler/types"
-	"github.com/skip-mev/go-fast-solver/shared/contracts/fast_transfer_gateway"
 	"github.com/skip-mev/go-fast-solver/shared/metrics"
 	"golang.org/x/sync/errgroup"
 
@@ -34,6 +32,10 @@ var params = Config{
 	Delay: 20 * time.Second,
 }
 
+const (
+	excessiveSettlementLatency = 1 * time.Hour
+)
+
 type Database interface {
 	GetAllOrderSettlementsWithSettlementStatus(ctx context.Context, settlementStatus string) ([]db.OrderSettlement, error)
 
@@ -47,11 +49,16 @@ type Database interface {
 	InsertOrderSettlement(ctx context.Context, arg db.InsertOrderSettlementParams) (db.OrderSettlement, error)
 	SetOrderStatus(ctx context.Context, arg db.SetOrderStatusParams) (db.Order, error)
 
+	SetHyperlaneTransferID(ctx context.Context, arg db.SetHyperlaneTransferIDParams) (db.OrderSettlement, error)
+
 	InTx(ctx context.Context, fn func(ctx context.Context, q db.Querier) error, opts *sql.TxOptions) error
+
+	ClearInitiateSettlement(ctx context.Context, arg db.ClearInitiateSettlementParams) ([]db.OrderSettlement, error)
 }
 
 type Relayer interface {
-	SubmitTxToRelay(ctx context.Context, txHash string, sourceChainID string, maxRelayTxFeeUUSDC *big.Int) error
+	SubmitTxToRelay(ctx context.Context, txHash string, sourceChainID string, maxRelayTxFeeUUSDC *big.Int) (ID int64, err error)
+	CancelRelay(ctx context.Context, chainID, transactionHash string) (bool, error)
 }
 
 type OrderSettler struct {
@@ -88,9 +95,13 @@ func (r *OrderSettler) Run(ctx context.Context) {
 			lmt.Logger(ctx).Error("error submitting settlements for relay", zap.Error(err))
 		}
 
-		if err := r.findNewSettlements(ctx); err != nil {
+		if err := r.createPendingSettlements(ctx); err != nil {
 			lmt.Logger(ctx).Error("error finding new settlements", zap.Error(err))
 			continue
+		}
+
+		if err := r.cancelSettlementRelays(ctx); err != nil {
+			lmt.Logger(ctx).Error("error canceling settlement relays", zap.Error(err))
 		}
 
 		if err := r.settleOrders(ctx); err != nil {
@@ -103,110 +114,35 @@ func (r *OrderSettler) Run(ctx context.Context) {
 	}
 }
 
-// TODO: feels like this is doing too much
-// findNewSettlements queries hyperlane for any fulfilled orders found and creates an order settlement job in the db
-func (r *OrderSettler) findNewSettlements(ctx context.Context) error {
-	var chains []config.ChainConfig
-	cosmosChains, err := config.GetConfigReader(ctx).GetAllChainConfigsOfType(config.ChainType_COSMOS)
+func (r *OrderSettler) createPendingSettlements(ctx context.Context) error {
+	pendingSettlements, err := DetectPendingSettlements(ctx, r.clientManager, r.ordersSeen)
 	if err != nil {
-		return fmt.Errorf("error getting Cosmos chains: %w", err)
-	}
-	for _, chain := range cosmosChains {
-		if chain.FastTransferContractAddress != "" {
-			chains = append(chains, chain)
-		}
+		return fmt.Errorf("detecting pending settlements: %w", err)
 	}
 
-	for _, chain := range chains {
-		bridgeClient, err := r.clientManager.GetClient(ctx, chain.ChainID)
+	for _, settlement := range pendingSettlements {
+		sourceChainConfig, err := config.GetConfigReader(ctx).GetChainConfig(settlement.SourceChainID)
 		if err != nil {
-			return fmt.Errorf("failed to get client: %w", err)
+			return fmt.Errorf("getting source chain config: %w", err)
 		}
 
-		fills, err := bridgeClient.OrderFillsByFiller(ctx, chain.FastTransferContractAddress, chain.SolverAddress)
-		if err != nil {
-			return fmt.Errorf("getting order fills: %w", err)
+		_, err = r.db.InsertOrderSettlement(ctx, db.InsertOrderSettlementParams{
+			SourceChainID:                     settlement.SourceChainID,
+			DestinationChainID:                settlement.DestinationChainID,
+			SourceChainGatewayContractAddress: sourceChainConfig.FastTransferContractAddress,
+			OrderID:                           settlement.OrderID,
+			SettlementStatus:                  dbtypes.SettlementStatusPending,
+			Amount:                            settlement.Amount.String(),
+			Profit:                            settlement.Profit.String(),
+		})
+
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to insert settlement: %w", err)
 		}
-		if len(fills) == 0 {
-			// solver has not made any fills on this chain, ignore
-			continue
-		}
-
-		for _, fill := range fills {
-			// continue if order has already been seen
-			if r.ordersSeen[fill.OrderID] {
-				continue
-			}
-
-			sourceChainID, err := config.GetConfigReader(ctx).GetChainIDByHyperlaneDomain(strconv.Itoa(int(fill.SourceDomain)))
-			if err != nil {
-				lmt.Logger(ctx).Warn(
-					"failed to get source chain ID by hyperlane domain. skipping order settlement. it may be unsettled.",
-					zap.Uint32("hyperlaneDomain", fill.SourceDomain),
-					zap.String("orderID", fill.OrderID),
-					zap.Error(err),
-				)
-				r.ordersSeen[fill.OrderID] = true
-				continue
-			}
-			sourceGatewayAddress, err := config.GetConfigReader(ctx).GetGatewayContractAddress(sourceChainID)
-			if err != nil {
-				return fmt.Errorf("getting source gateway address: %w", err)
-			}
-			sourceBridgeClient, err := r.clientManager.GetClient(ctx, sourceChainID)
-			if err != nil {
-				return fmt.Errorf("getting client for chainID %s: %w", sourceChainID, err)
-			}
-
-			height, err := sourceBridgeClient.BlockHeight(ctx)
-			if err != nil {
-				return fmt.Errorf("fetching current block height on chain %s: %w", sourceChainID, err)
-			}
-
-			// ensure order exists on source chain
-			exists, amount, err := sourceBridgeClient.OrderExists(ctx, sourceGatewayAddress, fill.OrderID, big.NewInt(int64(height)))
-			if err != nil {
-				return fmt.Errorf("checking if order %s exists on chainID %s: %w", fill.OrderID, sourceChainID, err)
-			}
-			if !exists {
-				r.ordersSeen[fill.OrderID] = true
-				continue
-			}
-
-			// ensure order is not already filled (an order is only marked as
-			// filled on the source chain once it is settled)
-			status, err := sourceBridgeClient.OrderStatus(ctx, sourceGatewayAddress, fill.OrderID)
-			if err != nil {
-				return fmt.Errorf("getting order %s status on chainID %s: %w", fill.OrderID, sourceChainID, err)
-			}
-			if status != fast_transfer_gateway.OrderStatusUnfilled {
-				r.ordersSeen[fill.OrderID] = true
-				continue
-			}
-
-			orderFillEvent, _, err := bridgeClient.QueryOrderFillEvent(ctx, chain.FastTransferContractAddress, fill.OrderID)
-			if err != nil {
-				return fmt.Errorf("querying for order fill event on destination chain at address %s for order id %s: %w", chain.FastTransferContractAddress, fill.OrderID, err)
-			}
-			profit := new(big.Int).Sub(amount, orderFillEvent.FillAmount)
-
-			_, err = r.db.InsertOrderSettlement(ctx, db.InsertOrderSettlementParams{
-				SourceChainID:                     sourceChainID,
-				DestinationChainID:                chain.ChainID,
-				SourceChainGatewayContractAddress: sourceGatewayAddress,
-				OrderID:                           fill.OrderID,
-				SettlementStatus:                  dbtypes.SettlementStatusPending,
-				Amount:                            amount.String(),
-				Profit:                            profit.String(),
-			})
-
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("failed to insert settlement: %w", err)
-			}
-			r.ordersSeen[fill.OrderID] = true
-			metrics.FromContext(ctx).IncOrderSettlementStatusChange(sourceChainID, chain.ChainID, dbtypes.SettlementStatusPending)
-		}
+		r.ordersSeen[settlement.OrderID] = true
+		metrics.FromContext(ctx).IncOrderSettlementStatusChange(settlement.SourceChainID, settlement.DestinationChainID, dbtypes.SettlementStatusPending)
 	}
+
 	return nil
 }
 
@@ -267,7 +203,8 @@ func (r *OrderSettler) submitInitiatedSettlementsForRelay(ctx context.Context) e
 		// these batches are grouped by initiation hash, so just choose the
 		// first one since they are all the same
 		hash := batch[0].InitiateSettlementTx.String
-		if err := r.relayBatch(ctx, hash, batch); err != nil {
+		ID, err := r.relayBatch(ctx, hash, batch)
+		if err != nil {
 			// continue to try and relay other settlements if one fails to be
 			// submitted
 			lmt.Logger(ctx).Error(
@@ -277,6 +214,18 @@ func (r *OrderSettler) submitInitiatedSettlementsForRelay(ctx context.Context) e
 				zap.String("settlementPayoutChainID", batch.SourceChainID()),
 				zap.String("settlementInitiationChainID", batch.DestinationChainID()),
 			)
+		} else {
+			for _, settlement := range batch {
+				_, err := r.db.SetHyperlaneTransferID(ctx, db.SetHyperlaneTransferIDParams{
+					HyperlaneTransferID:               sql.NullInt64{Int64: ID, Valid: true},
+					SourceChainID:                     settlement.SourceChainID,
+					OrderID:                           settlement.OrderID,
+					SourceChainGatewayContractAddress: settlement.SourceChainGatewayContractAddress,
+				})
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -290,7 +239,7 @@ func (r *OrderSettler) relayBatch(
 	ctx context.Context,
 	txHash string,
 	batch types.SettlementBatch,
-) error {
+) (int64, error) {
 	// the orders destination chain is where the settlement is initiated
 	settlementInitiationChainID := batch.DestinationChainID()
 
@@ -299,7 +248,7 @@ func (r *OrderSettler) relayBatch(
 
 	maxTxFeeUUSDC, err := r.maxBatchTxFeeUUSDC(ctx, batch)
 	if err != nil {
-		return fmt.Errorf("calculating max batch (hash: %s) tx fee in uusdc: %w", txHash, err)
+		return 0, fmt.Errorf("calculating max batch (hash: %s) tx fee in uusdc: %w", txHash, err)
 	}
 	if maxTxFeeUUSDC.Cmp(big.NewInt(0)) <= 0 {
 		lmt.Logger(ctx).Warn(
@@ -327,7 +276,7 @@ func (r *OrderSettler) relaySettlement(
 	settlementInitiationChainID string,
 	settlementPayoutChainID string,
 	maxTxFeeUUSDC *big.Int,
-) error {
+) (int64, error) {
 	var (
 		maxRetries = 5
 		baseDelay  = 2 * time.Second
@@ -335,14 +284,14 @@ func (r *OrderSettler) relaySettlement(
 	)
 
 	for i := 0; i < maxRetries; i++ {
-		if err = r.relayer.SubmitTxToRelay(ctx, txHash, settlementInitiationChainID, maxTxFeeUUSDC); err == nil {
-			return nil
+		if ID, err := r.relayer.SubmitTxToRelay(ctx, txHash, settlementInitiationChainID, maxTxFeeUUSDC); err == nil {
+			return ID, nil
 		}
 		delay := math.Pow(2, float64(i))
 		time.Sleep(time.Duration(delay) * baseDelay)
 	}
 
-	return fmt.Errorf(
+	return 0, fmt.Errorf(
 		"submitting settlement tx hash %s to be relayed from chain %s to chain %s: %w",
 		txHash, settlementInitiationChainID, settlementPayoutChainID, err,
 	)
@@ -419,6 +368,68 @@ func (r *OrderSettler) PendingSettlementBatches(ctx context.Context) ([]types.Se
 		}
 	}
 	return types.IntoSettlementBatchesByChains(uniniatedSettlements), nil
+}
+
+func (r *OrderSettler) cancelSettlementRelays(ctx context.Context) error {
+	pendingSettlements, err := r.db.GetAllOrderSettlementsWithSettlementStatus(ctx, dbtypes.SettlementStatusPending)
+	if err != nil {
+		return fmt.Errorf("getting orders pending settlement: %w", err)
+	}
+	initiatedSettlements, err := r.db.GetAllOrderSettlementsWithSettlementStatus(ctx, dbtypes.SettlementStatusSettlementInitiated)
+	if err != nil {
+		return fmt.Errorf("getting orders pending settlement: %w", err)
+	}
+	initiatedSettlementsByDestinationChain := make(map[string][]db.OrderSettlement)
+	unitiatedSettlementsByDestinationChain := make(map[string][]db.OrderSettlement)
+	for _, settlement := range pendingSettlements {
+		if !settlement.InitiateSettlementTx.Valid {
+			unitiatedSettlementsByDestinationChain[settlement.DestinationChainID] = append(unitiatedSettlementsByDestinationChain[settlement.DestinationChainID], settlement)
+		} else {
+			if settlement.HyperlaneTransferID.Valid {
+				initiatedSettlementsByDestinationChain[settlement.DestinationChainID] = append(initiatedSettlementsByDestinationChain[settlement.DestinationChainID], settlement)
+			}
+		}
+	}
+	for _, settlement := range initiatedSettlements {
+		if settlement.HyperlaneTransferID.Valid {
+			initiatedSettlementsByDestinationChain[settlement.DestinationChainID] = append(initiatedSettlementsByDestinationChain[settlement.DestinationChainID], settlement)
+		}
+	}
+	var settlementsToCancel []db.OrderSettlement
+	for destinationChain, settlements := range initiatedSettlementsByDestinationChain {
+		// check that there are new settlements to rebatch with
+		if len(unitiatedSettlementsByDestinationChain[destinationChain]) > 0 {
+			settlementsToCancel = append(settlementsToCancel, settlements...)
+		}
+	}
+	for _, settlement := range settlementsToCancel {
+		chainCfg, err := config.GetConfigReader(ctx).GetChainConfig(settlement.SourceChainID)
+		if err != nil {
+			return fmt.Errorf("getting chain config for settlement destination chain %s: %w", settlement.DestinationChainID, err)
+		}
+		if chainCfg.SettlementRebatchTimeout > 0 && time.Since(settlement.InitiateSettlementTxTime.Time) > chainCfg.SettlementRebatchTimeout {
+			ok, err := r.relayer.CancelRelay(ctx, settlement.DestinationChainID, settlement.InitiateSettlementTx.String)
+			if err != nil {
+				return fmt.Errorf("failed to cancel relay for settlement tx %s on chain %s: %w", settlement.InitiateSettlementTx.String, settlement.DestinationChainID, err)
+			}
+			if ok {
+				_, err := r.db.ClearInitiateSettlement(ctx, db.ClearInitiateSettlementParams{
+					SettlementStatus:     dbtypes.SettlementStatusPending,
+					DestinationChainID:   settlement.DestinationChainID,
+					InitiateSettlementTx: settlement.InitiateSettlementTx,
+				})
+				if err != nil {
+					return err
+				}
+				lmt.Logger(ctx).Info(
+					"cancelled relay for settlement",
+					zap.String("orderID", settlement.OrderID),
+					zap.String("sourceChainID", settlement.SourceChainID),
+					zap.String("initiateSettlementTx", settlement.InitiateSettlementTx.String))
+			}
+		}
+	}
+	return nil
 }
 
 // ShouldInitiateSettlement returns true if a settlement should be initiated
@@ -551,6 +562,9 @@ func (r *OrderSettler) verifyOrderSettlement(ctx context.Context, settlement db.
 	}
 	if !settlement.InitiateSettlementTx.Valid {
 		return errors.New("message received txHash is null")
+	}
+	if settlement.CreatedAt.Add(excessiveSettlementLatency).Before(time.Now()) {
+		metrics.FromContext(ctx).IncExcessiveOrderSettlementLatency(settlement.SourceChainID, settlement.DestinationChainID, settlement.SettlementStatus)
 	}
 
 	if settlement.SettlementStatus == dbtypes.SettlementStatusPending {

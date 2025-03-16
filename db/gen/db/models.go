@@ -60,6 +60,8 @@ type OrderSettlement struct {
 	CompleteSettlementTx              sql.NullString
 	SettlementStatus                  string
 	SettlementStatusMessage           sql.NullString
+	HyperlaneTransferID               sql.NullInt64
+	InitiateSettlementTxTime          sql.NullTime
 }
 
 type RebalanceTransfer struct {
@@ -86,6 +88,8 @@ type SubmittedTx struct {
 	TxType              string
 	TxStatus            string
 	TxStatusMessage     sql.NullString
+	TxCostUusdc         sql.NullString
+	RebalanceTransferID sql.NullInt64
 }
 
 type TransferMonitorMetadatum struct {

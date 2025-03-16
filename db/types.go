@@ -21,6 +21,8 @@ const (
 	TxTypeSettlement               string = "SETTLEMENT"
 	TxTypeHyperlaneMessageDelivery string = "HYPERLANE_MESSAGE_DELIVERY"
 	TxTypeInitiateTimeout          string = "INITIATE_TIMEOUT"
+	TxTypeERC20Approval            string = "ERC20_APPROVAL"
+	TxTypeFundRebalnance           string = "FUND_REBALANCE"
 
 	RebalanceTransferStatusAbandoned string = "ABANDONED"
 	RebalanceTransferStatusPending   string = "PENDING"
@@ -30,6 +32,7 @@ const (
 	TransferStatusPending   string = "PENDING"
 	TransferStatusSuccess   string = "SUCCESS"
 	TransferStatusAbandoned string = "ABANDONED"
+	TransferStatusCancelled string = "CANCELLED"
 
 	GET    string = "GET"
 	INSERT string = "INSERT"

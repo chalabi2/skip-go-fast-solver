@@ -10,10 +10,12 @@ import (
 )
 
 type Querier interface {
+	ClearInitiateSettlement(ctx context.Context, arg ClearInitiateSettlementParams) ([]OrderSettlement, error)
 	GetAllHyperlaneTransfersWithTransferStatus(ctx context.Context, transferStatus string) ([]HyperlaneTransfer, error)
 	GetAllOrderSettlementsWithSettlementStatus(ctx context.Context, settlementStatus string) ([]OrderSettlement, error)
 	GetAllOrdersWithOrderStatus(ctx context.Context, orderStatus string) ([]Order, error)
 	GetAllPendingRebalanceTransfers(ctx context.Context) ([]GetAllPendingRebalanceTransfersRow, error)
+	GetAllSubmittedTxs(ctx context.Context) ([]SubmittedTx, error)
 	GetHyperlaneTransferByMessageSentTx(ctx context.Context, arg GetHyperlaneTransferByMessageSentTxParams) (HyperlaneTransfer, error)
 	GetOrderByOrderID(ctx context.Context, orderID string) (Order, error)
 	GetOrderSettlement(ctx context.Context, arg GetOrderSettlementParams) (OrderSettlement, error)
@@ -31,6 +33,7 @@ type Querier interface {
 	InsertTransferMonitorMetadata(ctx context.Context, arg InsertTransferMonitorMetadataParams) (TransferMonitorMetadatum, error)
 	SetCompleteSettlementTx(ctx context.Context, arg SetCompleteSettlementTxParams) (OrderSettlement, error)
 	SetFillTx(ctx context.Context, arg SetFillTxParams) (Order, error)
+	SetHyperlaneTransferID(ctx context.Context, arg SetHyperlaneTransferIDParams) (OrderSettlement, error)
 	SetInitiateSettlementTx(ctx context.Context, arg SetInitiateSettlementTxParams) (OrderSettlement, error)
 	SetMessageStatus(ctx context.Context, arg SetMessageStatusParams) (HyperlaneTransfer, error)
 	SetOrderStatus(ctx context.Context, arg SetOrderStatusParams) (Order, error)
