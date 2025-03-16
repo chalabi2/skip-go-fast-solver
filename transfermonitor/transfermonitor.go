@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cosmossdk.io/math"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -29,6 +30,7 @@ import (
 const (
 	maxBlocksProcessedPerIteration = 100000
 	destinationChainID             = "osmosis-1"
+	orderSubmittedEventSignature   = "0x59f858504f8d8ad967dd7453df850e265270474e364b7e2fbd3333e06efdbfc0"
 )
 
 type MonitorDBQueries interface {
@@ -436,8 +438,21 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 		return fmt.Errorf("error getting websocket client: %w", err)
 	}
 
-	headers := make(chan *types.Header)
-	sub, err := wsClient.EthSubscribe(ctx, headers, "newHeads")
+	// Create client for contract interaction
+	ethClient := ethclient.NewClient(wsClient)
+
+	// Create filter query for OrderSubmitted events
+	contractAddress := common.HexToAddress(chain.FastTransferContractAddress)
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{contractAddress},
+		Topics: [][]common.Hash{{
+			common.HexToHash(orderSubmittedEventSignature),
+		}},
+	}
+
+	// Subscribe to event logs
+	logs := make(chan types.Log)
+	sub, err := ethClient.SubscribeFilterLogs(ctx, query, logs)
 	if err != nil {
 		// Add metrics alongside existing logging
 		metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
@@ -455,43 +470,10 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 	// Add metric for successful connection
 	metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeWebSocket)
 
-	lmt.Logger(ctx).Info("Successfully established WebSocket connection",
+	lmt.Logger(ctx).Info("Successfully established WebSocket connection for OrderSubmitted events",
 		zap.String("chain_id", chainID),
-		zap.String("chain_name", chain.ChainName))
-
-	var lastProcessedHeight uint64
-	transferMonitorMetadata, err := t.db.GetTransferMonitorMetadata(ctx, chainID)
-	if err == nil {
-		lastProcessedHeight = uint64(transferMonitorMetadata.HeightLastSeen)
-	} else if !strings.Contains(err.Error(), "no rows in result set") {
-		// Only log as error if it's not simply a "no rows" error
-		lmt.Logger(ctx).Error("Error retrieving transfer monitor metadata",
-			zap.String("chain_id", chainID),
-			zap.Error(err))
-
-		// If we have a quick start configuration, we might want to use that instead
-		if t.quickStart && !t.didQuickStart[chainID] {
-			latestBlock, latestErr := t.getLatestBlockHeight(ctx, chain)
-			if latestErr != nil {
-				lmt.Logger(ctx).Error("Failed to get latest block height for quick start fallback",
-					zap.String("chain_id", chainID),
-					zap.Error(latestErr))
-			} else {
-				quickStartBlockHeight := latestBlock - chain.QuickStartNumBlocksBack
-				lastProcessedHeight = quickStartBlockHeight
-				lmt.Logger(ctx).Info("Using quick start block height due to metadata error",
-					zap.String("chain_id", chainID),
-					zap.Uint64("quick_start_height", quickStartBlockHeight))
-
-				// Mark this chain as having been quickstarted
-				t.didQuickStart[chainID] = true
-			}
-		}
-	} else {
-		// No rows found, this is the first time processing this chain
-		lmt.Logger(ctx).Info("No existing metadata found, starting from height 0",
-			zap.String("chain_id", chainID))
-	}
+		zap.String("chain_name", chain.ChainName),
+		zap.String("contract_address", chain.FastTransferContractAddress))
 
 	for {
 		select {
@@ -506,113 +488,94 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 				zap.String("chain_name", chain.ChainName),
 				zap.Error(err))
 			return fmt.Errorf("subscription error for chain %s: %w", chainID, err)
-		case header := <-headers:
-			if header.Number.Uint64() <= lastProcessedHeight {
-				continue
-			}
-
+		case vLog := <-logs:
+			// Process the log event
 			metrics.FromContext(ctx).IncrementBlocksReceived(chainID, "transfer_monitor")
 
-			orders, endBlockHeight, err := t.findNewTransferIntentsOnEVMChain(ctx, chain, lastProcessedHeight+1)
+			// Create contract instance for parsing the log
+			fastTransferGateway, err := fast_transfer_gateway.NewFastTransferGateway(
+				contractAddress,
+				ethClient,
+			)
 			if err != nil {
-				lmt.Logger(ctx).Error("Error finding transfer intents",
+				lmt.Logger(ctx).Error("Error creating contract instance",
 					zap.String("chain_id", chainID),
-					zap.Uint64("start_height", lastProcessedHeight+1),
 					zap.Error(err))
-
-				// Check if context is canceled to avoid unnecessary retries
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
 				continue
 			}
 
-			if len(orders) > 0 {
-				lmt.Logger(ctx).Info("Found transfer intents via WebSocket",
-					zap.Int("count", len(orders)),
+			// Parse the log to get OrderSubmitted event data
+			event, err := fastTransferGateway.ParseOrderSubmitted(vLog)
+			if err != nil {
+				lmt.Logger(ctx).Error("Error parsing OrderSubmitted event",
 					zap.String("chain_id", chainID),
-					zap.Uint64("start_height", lastProcessedHeight+1),
-					zap.Uint64("end_height", endBlockHeight))
+					zap.Error(err))
+				continue
+			}
 
-				errorCount := 0
-				for _, order := range orders {
-					toInsert := db.InsertOrderParams{
-						SourceChainID:                     order.ChainID,
-						DestinationChainID:                order.DestinationChainID,
-						SourceChainGatewayContractAddress: chain.FastTransferContractAddress, // Fix: using proper contract address instead of chainID
-						Sender:                            order.OrderEvent.Sender[:],
-						Recipient:                         order.OrderEvent.Recipient[:],
-						AmountIn:                          order.OrderEvent.AmountIn.String(),
-						AmountOut:                         order.OrderEvent.AmountOut.String(),
-						Nonce:                             int64(order.OrderEvent.Nonce),
-						OrderCreationTx:                   order.TxHash,
-						OrderCreationTxBlockHeight:        int64(order.TxBlockHeight),
-						OrderID:                           order.OrderID,
-						OrderStatus:                       dbtypes.OrderStatusPending,
-						TimeoutTimestamp:                  time.Unix(order.TimeoutTimestamp, 0).UTC(),
-					}
-					if len(order.OrderEvent.Data) > 0 {
-						toInsert.Data = sql.NullString{String: hex.EncodeToString(order.OrderEvent.Data), Valid: true}
-					}
+			// Create order from event data
+			orderData := fast_transfer_gateway.DecodeOrder(event.Order)
+			order := Order{
+				TxHash:             vLog.TxHash.Hex(),
+				TxBlockHeight:      vLog.BlockNumber,
+				ChainID:            chainID,
+				DestinationChainID: destinationChainID,
+				ChainEnvironment:   chain.Environment,
+				OrderEvent:         orderData,
+				OrderID:            hex.EncodeToString(event.OrderID[:]),
+				TimeoutTimestamp:   int64(orderData.TimeoutTimestamp),
+			}
 
-					_, err := t.db.InsertOrder(ctx, toInsert)
-					if err != nil {
-						if strings.Contains(err.Error(), "sql: no rows in result set") {
-							// This is expected in some cases, just continue
-							continue
-						}
+			// Insert the order into the database
+			toInsert := db.InsertOrderParams{
+				SourceChainID:                     order.ChainID,
+				DestinationChainID:                order.DestinationChainID,
+				SourceChainGatewayContractAddress: chain.FastTransferContractAddress,
+				Sender:                            order.OrderEvent.Sender[:],
+				Recipient:                         order.OrderEvent.Recipient[:],
+				AmountIn:                          order.OrderEvent.AmountIn.String(),
+				AmountOut:                         order.OrderEvent.AmountOut.String(),
+				Nonce:                             int64(order.OrderEvent.Nonce),
+				OrderCreationTx:                   order.TxHash,
+				OrderCreationTxBlockHeight:        int64(order.TxBlockHeight),
+				OrderID:                           order.OrderID,
+				OrderStatus:                       dbtypes.OrderStatusPending,
+				TimeoutTimestamp:                  time.Unix(order.TimeoutTimestamp, 0).UTC(),
+			}
 
-						if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") {
-							// Log at debug level for duplicates
-							lmt.Logger(ctx).Debug("Skipping duplicate order",
-								zap.String("order_id", order.OrderID),
-								zap.String("chain_id", chainID))
-							continue
-						}
+			if len(order.OrderEvent.Data) > 0 {
+				toInsert.Data = sql.NullString{String: hex.EncodeToString(order.OrderEvent.Data), Valid: true}
+			}
 
-						// Real error
-						lmt.Logger(ctx).Error("Error inserting order",
-							zap.String("order_id", order.OrderID),
-							zap.String("chain_id", chainID),
-							zap.Error(err))
-
-						errorCount++
-						if errorCount >= 3 {
-							// If we hit too many errors, break out but continue processing
-							lmt.Logger(ctx).Warn("Too many errors inserting orders, skipping remaining orders in batch",
-								zap.String("chain_id", chainID),
-								zap.Int("error_count", errorCount),
-								zap.Int("total_orders", len(orders)))
-							break
-						}
-						continue
-					}
-
-					metrics.FromContext(ctx).IncFillOrderStatusChange(order.ChainID, order.DestinationChainID, dbtypes.OrderStatusPending)
+			_, err = t.db.InsertOrder(ctx, toInsert)
+			if err != nil {
+				if strings.Contains(err.Error(), "sql: no rows in result set") {
+					// This is expected in some cases, just continue
+					continue
 				}
 
-				// Don't stop processing just because we had some insert errors
-				// We'll still update the metadata and continue with the next block
-			}
+				if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") {
+					// Log at debug level for duplicates
+					lmt.Logger(ctx).Debug("Skipping duplicate order",
+						zap.String("order_id", order.OrderID),
+						zap.String("chain_id", chainID))
+					continue
+				}
 
-			// Always try to update metadata even if there were some errors
-			_, err = t.db.InsertTransferMonitorMetadata(ctx, db.InsertTransferMonitorMetadataParams{
-				ChainID:        chainID,
-				HeightLastSeen: int64(endBlockHeight),
-			})
-			if err != nil {
-				lmt.Logger(ctx).Error("Error inserting transfer monitor metadata",
+				// Real error
+				lmt.Logger(ctx).Error("Error inserting order",
+					zap.String("order_id", order.OrderID),
 					zap.String("chain_id", chainID),
-					zap.Uint64("height", endBlockHeight),
 					zap.Error(err))
-				// Continue processing even if metadata update fails
-			} else {
-				lastProcessedHeight = endBlockHeight
-				lmt.Logger(ctx).Debug("Updated last processed height",
-					zap.String("chain_id", chainID),
-					zap.Uint64("height", endBlockHeight))
+				continue
 			}
 
+			metrics.FromContext(ctx).IncFillOrderStatusChange(order.ChainID, order.DestinationChainID, dbtypes.OrderStatusPending)
+
+			lmt.Logger(ctx).Info("Processed order from WebSocket subscription",
+				zap.String("chain_id", chainID),
+				zap.String("order_id", order.OrderID),
+				zap.Uint64("block_number", vLog.BlockNumber))
 		case <-ctx.Done():
 			sub.Unsubscribe()
 			wsClient.Close()
