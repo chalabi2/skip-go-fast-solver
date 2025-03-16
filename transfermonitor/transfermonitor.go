@@ -80,6 +80,7 @@ func (t *TransferMonitor) Start(ctx context.Context) error {
 	}
 
 	if t.useWebSocket {
+		lmt.Logger(ctx).Info("Starting WebSocket-based transfer monitoring")
 		eg, ctx := errgroup.WithContext(ctx)
 		for _, chain := range chains {
 			chain := chain
@@ -87,13 +88,22 @@ func (t *TransferMonitor) Start(ctx context.Context) error {
 				return t.startWebSocketMonitor(ctx, chain)
 			})
 		}
+
+		// Wait for WebSocket monitors in a separate goroutine
 		go func() {
 			if err := eg.Wait(); err != nil {
 				lmt.Logger(ctx).Error("WebSocket monitor error", zap.Error(err))
 			}
 		}()
+
+		// When using WebSockets, just wait for context cancellation
+		// without running RPC polling
+		<-ctx.Done()
+		return nil
 	}
 
+	// Only run RPC polling if WebSockets are disabled
+	lmt.Logger(ctx).Info("Starting RPC-based transfer monitoring")
 	for {
 		select {
 		case <-ctx.Done():
