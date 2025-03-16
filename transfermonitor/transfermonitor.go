@@ -539,6 +539,12 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 			lastProcessedHeight = endBlockHeight
 
 		case <-ctx.Done():
+			sub.Unsubscribe()
+			wsClient.Close()
+			lmt.Logger(ctx).Info("WebSocket subscription unsubscribed and connection closed",
+				zap.String("chain_id", chain.ChainID),
+				zap.String("chain_name", chain.ChainName))
+			return nil
 			return nil
 		}
 	}
