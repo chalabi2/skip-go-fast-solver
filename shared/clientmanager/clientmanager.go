@@ -34,6 +34,7 @@ import (
 type ClientManager struct {
 	keyStore         keys.KeyStore
 	clients          map[string]cctp.BridgeClient
+	wsClients        map[string]*ethereumrpc.Client
 	mu               sync.RWMutex
 	cosmosTxExecutor cosmos.CosmosTxExecutor
 }
@@ -42,6 +43,7 @@ func NewClientManager(chainIDToPrivateKey keys.KeyStore, cosmosTxExecutor cosmos
 	return &ClientManager{
 		keyStore:         chainIDToPrivateKey,
 		clients:          make(map[string]cctp.BridgeClient),
+		wsClients:        make(map[string]*ethereumrpc.Client),
 		cosmosTxExecutor: cosmosTxExecutor,
 	}
 }
@@ -210,4 +212,35 @@ func (cm *ClientManager) createEVMClient(
 	)
 
 	return bridgeClient, err
+}
+
+func (cm *ClientManager) GetWebSocketClient(ctx context.Context, chainID string) (*ethereumrpc.Client, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if client, ok := cm.wsClients[chainID]; ok {
+		return client, nil
+	}
+
+	wsEndpoint, err := config.GetConfigReader(ctx).GetWSEndpoint(chainID)
+	if err != nil {
+		return nil, err
+	}
+
+	basicAuth, err := config.GetConfigReader(ctx).GetBasicAuth(chainID)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := ethereumrpc.DialContext(ctx, wsEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	if basicAuth != nil {
+		client.SetHeader("Authorization", fmt.Sprintf("Basic %s", *basicAuth))
+	}
+
+	cm.wsClients[chainID] = client
+	return client, nil
 }

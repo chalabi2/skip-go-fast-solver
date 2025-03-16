@@ -24,6 +24,10 @@ const (
 	gasBalanceLevelLabel    = "gas_balance_level"
 	gasTokenSymbolLabel     = "gas_token_symbol"
 	chainNameLabel          = "chain_name"
+
+	// Connection types
+	ConnectionTypeWebSocket = "websocket"
+	ConnectionTypeRPC       = "rpc"
 )
 
 type Metrics interface {
@@ -52,6 +56,11 @@ type Metrics interface {
 	IncExcessiveOrderFulfillmentLatency(sourceChainID, destinationChainID, orderStatus string)
 	IncExcessiveOrderSettlementLatency(sourceChainID, destinationChainID, settlementStatus string)
 	IncExcessiveHyperlaneRelayLatency(sourceChainID, destinationChainID string)
+
+	SetConnectionType(chainID, monitor, connType string)
+	IncrementBlocksReceived(chainID, monitor string)
+	RecordSubscriptionError(chainID, monitor, errorType string)
+	RecordConnectionSwitch(chainID, monitor, fromType, toType string)
 }
 
 type metricsContextKey struct{}
@@ -97,10 +106,16 @@ type PromMetrics struct {
 
 	gasBalance      metrics.Gauge
 	gasBalanceState metrics.Gauge
+
+	// New WebSocket metrics using go-kit metrics types
+	connectionType     metrics.Gauge
+	blocksReceived     metrics.Counter
+	subscriptionErrors metrics.Counter
+	connectionSwitches metrics.Counter
 }
 
 func NewPromMetrics() Metrics {
-	return &PromMetrics{
+	m := &PromMetrics{
 		fillOrderStatusChange: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "fill_order_status_change_counter",
@@ -219,7 +234,34 @@ func NewPromMetrics() Metrics {
 			Name:      "gas_balance_state_gauge",
 			Help:      "gas balance states (0=ok 1=warning 2=critical), paginated by chain id",
 		}, []string{chainIDLabel, chainNameLabel}),
+
+		// New WebSocket metrics using go-kit constructors
+		connectionType: prom.NewGaugeFrom(stdprom.GaugeOpts{
+			Namespace: "solver",
+			Name:      "chain_connection_type",
+			Help:      "Current connection type (0=RPC, 1=WebSocket) for each chain and monitor",
+		}, []string{"chain_id", "monitor"}),
+
+		blocksReceived: prom.NewCounterFrom(stdprom.CounterOpts{
+			Namespace: "solver",
+			Name:      "websocket_blocks_received_total",
+			Help:      "Number of blocks received via WebSocket per chain and monitor",
+		}, []string{"chain_id", "monitor"}),
+
+		subscriptionErrors: prom.NewCounterFrom(stdprom.CounterOpts{
+			Namespace: "solver",
+			Name:      "websocket_subscription_errors_total",
+			Help:      "Number of WebSocket subscription errors per chain, monitor, and error type",
+		}, []string{"chain_id", "monitor", "error_type"}),
+
+		connectionSwitches: prom.NewCounterFrom(stdprom.CounterOpts{
+			Namespace: "solver",
+			Name:      "connection_type_switches_total",
+			Help:      "Number of switches between connection types per chain and monitor",
+		}, []string{"chain_id", "monitor", "from_type", "to_type"}),
 	}
+
+	return m
 }
 
 func (m *PromMetrics) IncTransactionSubmitted(success bool, chainID, transactionType string) {
@@ -327,6 +369,26 @@ func (m *PromMetrics) IncExcessiveHyperlaneRelayLatency(sourceChainID, destinati
 	).Add(1)
 }
 
+func (m *PromMetrics) SetConnectionType(chainID, monitor, connType string) {
+	value := 0.0
+	if connType == ConnectionTypeWebSocket {
+		value = 1.0
+	}
+	m.connectionType.With("chain_id", chainID, "monitor", monitor).Set(value)
+}
+
+func (m *PromMetrics) IncrementBlocksReceived(chainID, monitor string) {
+	m.blocksReceived.With("chain_id", chainID, "monitor", monitor).Add(1)
+}
+
+func (m *PromMetrics) RecordSubscriptionError(chainID, monitor, errorType string) {
+	m.subscriptionErrors.With("chain_id", chainID, "monitor", monitor, "error_type", errorType).Add(1)
+}
+
+func (m *PromMetrics) RecordConnectionSwitch(chainID, monitor, fromType, toType string) {
+	m.connectionSwitches.With("chain_id", chainID, "monitor", monitor, "from_type", fromType, "to_type", toType).Add(1)
+}
+
 type NoOpMetrics struct{}
 
 func (n NoOpMetrics) IncExcessiveOrderFulfillmentLatency(sourceChainID, destinationChainID, orderStatus string) {
@@ -362,6 +424,10 @@ func (n NoOpMetrics) ObserveTransferSizeOutOfRange(sourceChainID, destinationCha
 func (n *NoOpMetrics) SetGasBalance(chainID, chainName, gasTokenSymbol string, gasBalance, warningThreshold, criticalThreshold big.Int, gasTokenDecimals uint8) {
 }
 func (n NoOpMetrics) ObserveFeeBpsRejection(sourceChainID, destinationChainID string, feeBps int64) {}
+func (n NoOpMetrics) SetConnectionType(chainID, monitor, connType string)                           {}
+func (n NoOpMetrics) IncrementBlocksReceived(chainID, monitor string)                               {}
+func (n NoOpMetrics) RecordSubscriptionError(chainID, monitor, errorType string)                    {}
+func (n NoOpMetrics) RecordConnectionSwitch(chainID, monitor, fromType, toType string)              {}
 func NewNoOpMetrics() Metrics {
 	return &NoOpMetrics{}
 }

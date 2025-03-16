@@ -690,3 +690,7 @@ func (c *CosmosBridgeClient) BlockHeight(ctx context.Context) (uint64, error) {
 func (c *CosmosBridgeClient) QueryOrderSubmittedEvent(ctx context.Context, gatewayContractAddress, orderID string) (*fast_transfer_gateway.FastTransferOrder, error) {
 	return nil, errors.New("not implemented")
 }
+
+func (c *CosmosBridgeClient) SubscribeNewHeads(ctx context.Context) (Subscription, error) {
+	return nil, fmt.Errorf("websocket subscriptions not supported for Cosmos chains")
+}

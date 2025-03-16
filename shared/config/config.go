@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/skip-mev/go-fast-solver/shared/lmt"
@@ -39,6 +40,7 @@ type Config struct {
 	// amounts, and the FundRebalancer will use skip go to move funds between
 	// chains to maintain these values.
 	FundRebalancer map[string]FundRebalancerConfig `yaml:"fund_rebalancer"`
+	GasMonitorConfig GasMonitorConfig `yaml:"gas_monitor"`
 }
 
 type OrderFillerConfig struct {
@@ -84,6 +86,8 @@ type FundRebalancerConfig struct {
 type TransferMonitorConfig struct {
 	// PollInterval controls how often the transfer monitor will query the chain for new orders
 	PollInterval *time.Duration `yaml:"poll_interval"`
+	// UseWebSocket enables WebSocket connections for real-time block monitoring
+	UseWebSocket bool           `yaml:"use_websocket"`
 }
 
 type ChainConfig struct {
@@ -304,6 +308,8 @@ type EVMConfig struct {
 	MinGasTipCap *int64 `yaml:"min_gas_tip_cap"`
 	// RPC is the HTTP endpoint for the EVM chain's RPC server
 	RPC string `yaml:"rpc"`
+	// WSEndpoint is the WebSocket endpoint for the EVM chain's RPC server
+	WSEndpoint string `yaml:"ws_endpoint"`
 	// RPCBasicAuthVar is the environment variable name containing the basic auth
 	// credentials for the RPC endpoint if required
 	RPCBasicAuthVar string `yaml:"rpc_basic_auth_var"`
@@ -329,6 +335,11 @@ type CoingeckoConfig struct {
 	// cache prices for. Set this accoridng to your coin gecko's plans rate
 	// limits (if you have one).
 	CacheRefreshInterval time.Duration `yaml:"cache_refresh_interval"`
+}
+
+type GasMonitorConfig struct {
+	PollInterval time.Duration `yaml:"poll_interval"`
+	UseWebSocket bool          `yaml:"use_websocket"`
 }
 
 // Config Helpers
@@ -385,6 +396,7 @@ type ConfigReader interface {
 
 	GetGasAlertThresholds(chainID string) (warningThreshold, criticalThreshold *big.Int, err error)
 	GetFundRebalancingConfig(chainID string) (FundRebalancerConfig, error)
+	GetWSEndpoint(chainID string) (string, error)
 }
 
 type configReader struct {
@@ -556,6 +568,19 @@ func (r configReader) GetFundRebalancingConfig(chainID string) (FundRebalancerCo
 	return fundRebalancingConfig, nil
 }
 
+func (r configReader) GetWSEndpoint(chainID string) (string, error) {
+	chain, ok := r.chainIDIndex[chainID]
+	if !ok {
+		return "", fmt.Errorf("chain id %s not found", chainID)
+	}
+
+	if chain.Type == ChainType_EVM && chain.EVM != nil {
+		return chain.EVM.WSEndpoint, nil
+	}
+
+	return "", fmt.Errorf("websocket endpoint not configured for chain %s", chainID)
+}
+
 func ValidateChainConfig(chain ChainConfig) error {
 	if chain.ChainName == "" {
 		return fmt.Errorf("chain_name is required")
@@ -678,6 +703,13 @@ func validateCosmosConfig(config *CosmosConfig, relayerConfig *RelayerConfig) er
 func validateEVMConfig(config *EVMConfig) error {
 	if config.RPC == "" {
 		return fmt.Errorf("evm.rpc is required")
+	}
+
+	// Don't require WS endpoint, but validate if provided
+	if config.WSEndpoint != "" {
+		if !strings.HasPrefix(config.WSEndpoint, "ws://") && !strings.HasPrefix(config.WSEndpoint, "wss://") {
+			return fmt.Errorf("evm.ws must start with ws:// or wss://")
+		}
 	}
 
 	if config.SignerGasBalance.WarningThresholdWei == "" {

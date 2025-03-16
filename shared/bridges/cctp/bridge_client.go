@@ -58,6 +58,12 @@ func (e ErrTxResultNotFound) Error() string {
 	return fmt.Sprintf("tx result not found for tx: %s", e.TxHash)
 }
 
+type Subscription interface {
+	Data() <-chan interface{}
+	Err() <-chan error
+	Unsubscribe()
+}
+
 type ErrOrderFillEventNotFound struct {
 	OrderID string
 }
@@ -81,4 +87,5 @@ type BridgeClient interface {
 	InitiateTimeout(ctx context.Context, order db.Order, gatewayContractAddress string) (string, string, *uint64, error)
 	OrderStatus(ctx context.Context, gatewayContractAddress, orderID string) (uint8, error)
 	QueryOrderSubmittedEvent(ctx context.Context, gatewayContractAddress, orderID string) (*fast_transfer_gateway.FastTransferOrder, error)
+	SubscribeNewHeads(ctx context.Context) (Subscription, error)
 }

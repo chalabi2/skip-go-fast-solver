@@ -19,6 +19,7 @@ order_filler:
 
 transfer_monitor:
   poll_interval: 5s
+  use_websocket: true
 
 # The fund_rebalancer config is optional. If you do not want the solver to
 # rebalance your funds across chains via Skip GO (via the CCTP slow path CCTP, they
@@ -93,6 +94,7 @@ chains:
       signer_gas_balance:
         warning_threshold_wei: 1000000
         critical_threshold_wei: 1000000
+      ws: "wss://eth-mainnet.example.com"
     relayer:
       mailbox_address: "0xc005dc82818d67AF737725bD4bf75435d065D239"
       profitable_relay_timeout: 1h
@@ -122,6 +124,7 @@ chains:
       signer_gas_balance:
         warning_threshold_wei: 1000000000000000000 # 1 avax
         critical_threshold_wei: 500000000000000000 # 0.5 avax
+      ws: "wss://avalanche-mainnet.example.com"
     relayer:
       mailbox_address: "0xFf06aFcaABaDDd1fb08371f9ccA15D73D51FeBD6"
       profitable_relay_timeout: 1h
@@ -151,6 +154,7 @@ chains:
       signer_gas_balance:
         warning_threshold_wei: 10000000000000000 # .01 eth ~ $30
         critical_threshold_wei: 1000000000000000 # .001 eth ~ $3
+      ws: "wss://optimism-mainnet.example.com"
     relayer:
       mailbox_address: "0xd4C1905BB1D26BC93DAC913e13CaCC278CdCC80D"
       profitable_relay_timeout: 1h
@@ -180,6 +184,7 @@ chains:
       signer_gas_balance:
         warning_threshold_wei: 10000000000000000 # .01 eth ~ $30
         critical_threshold_wei: 1000000000000000 # .001 eth ~ $3
+      ws: "wss://arbitrum-mainnet.example.com"
     relayer:
       mailbox_address: "0x979Ca5202784112f4738403dBec5D0F3B9daabB9"
       profitable_relay_timeout: 1h
@@ -243,6 +248,7 @@ chains:
       signer_gas_balance:
         warning_threshold_wei: 10000000000000000 # .01 eth ~ $30
         critical_threshold_wei: 1000000000000000 # .001 eth ~ $3
+      ws: "wss://base-mainnet.example.com"
     relayer:
       mailbox_address: "0xeA87ae93Fa0019a82A727bfd3eBd1cFCa8f64f1D"
       profitable_relay_timeout: 1h
@@ -273,6 +279,7 @@ chains:
         warning_threshold_wei: 1000000000000000000 # 1 matic
         critical_threshold_wei: 500000000000000000 # 0.5 matic
         min_gas_tip_cap: 30000000000
+      ws: "wss://polygon-mainnet.example.com"
     relayer:
       mailbox_address: "0x5d934f4e2f797775e53561bB72aca21ba36B96BB"
       profitable_relay_timeout: 1h

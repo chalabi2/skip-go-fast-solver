@@ -162,8 +162,13 @@ func main() {
 		return nil
 	})
 
-	eg.Go(func() error {
-		transferMonitor := transfermonitor.NewTransferMonitor(db.New(dbConn), *quickStart, cfg.TransferMonitorConfig.PollInterval)
+eg.Go(func() error {
+		transferMonitor := transfermonitor.NewTransferMonitor(
+			db.New(dbConn), 
+			*quickStart, 
+			cfg.TransferMonitorConfig.PollInterval,
+			cfg.TransferMonitorConfig.UseWebSocket,
+		)
 		err := transferMonitor.Start(ctx)
 		if err != nil {
 			return fmt.Errorf("creating transfer monitor: %w", err)
@@ -172,7 +177,11 @@ func main() {
 	})
 
 	eg.Go(func() error {
-		gasMonitor := gasmonitor.NewGasMonitor(clientManager)
+		gasMonitor := gasmonitor.NewGasMonitor(
+			clientManager,
+			cfg.GasMonitorConfig.UseWebSocket,
+			cfg.GasMonitorConfig.PollInterval,
+		)
 		err := gasMonitor.Start(ctx)
 		if err != nil {
 			return fmt.Errorf("creating gas monitor: %w", err)
@@ -193,26 +202,26 @@ func main() {
 }
 
 func redactConfig(cfg *config.Config) config.Config {
-	redactedConfig := *cfg
-	redactedConfig.Chains = make(map[string]config.ChainConfig)
+    redactedConfig := *cfg
+    redactedConfig.Chains = make(map[string]config.ChainConfig)
 
-	for chainID, chain := range cfg.Chains {
-		chainCopy := chain
-		if chainCopy.Cosmos != nil {
-			cosmosCopy := *chainCopy.Cosmos
-			cosmosCopy.RPC = "[redacted]"
-			cosmosCopy.GRPC = "[redacted]"
-			cosmosCopy.RPCBasicAuthVar = "[redacted]"
-			chainCopy.Cosmos = &cosmosCopy
-		}
-		if chainCopy.EVM != nil {
-			evmCopy := *chainCopy.EVM
-			evmCopy.RPC = "[redacted]"
-			evmCopy.RPCBasicAuthVar = "[redacted]"
-			chainCopy.EVM = &evmCopy
-		}
-		redactedConfig.Chains[chainID] = chainCopy
-	}
-
-	return redactedConfig
+    for chainID, chain := range cfg.Chains {
+        chainCopy := chain
+        if chainCopy.Cosmos != nil {
+            cosmosCopy := *chainCopy.Cosmos
+            cosmosCopy.RPC = "[redacted]"
+            cosmosCopy.GRPC = "[redacted]"
+            cosmosCopy.RPCBasicAuthVar = "[redacted]"
+            chainCopy.Cosmos = &cosmosCopy
+        }
+        if chainCopy.EVM != nil {
+            evmCopy := *chainCopy.EVM
+            evmCopy.RPC = "[redacted]"
+            evmCopy.WSEndpoint = "[redacted]" 
+            evmCopy.RPCBasicAuthVar = "[redacted]"
+            chainCopy.EVM = &evmCopy
+        }
+        redactedConfig.Chains[chainID] = chainCopy
+    }
+    return redactedConfig
 }
