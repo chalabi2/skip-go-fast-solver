@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/metrics"
-	kitprom "github.com/go-kit/kit/metrics/prometheus"
+	prom "github.com/go-kit/kit/metrics/prometheus"
 	stdprom "github.com/prometheus/client_golang/prometheus"
 )
 
@@ -116,12 +116,12 @@ type PromMetrics struct {
 
 func NewPromMetrics() Metrics {
 	m := &PromMetrics{
-		fillOrderStatusChange: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		fillOrderStatusChange: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "fill_order_status_change_counter",
 			Help:      "numbers of fill order status changes, paginated by source and destination chain, and status",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, orderStatusLabel}),
-		excessiveOrderFulfillmentLatency: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		excessiveOrderFulfillmentLatency: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "excessive_order_fulfillment_latency_counter",
 			Help:      "number of observations of excessive order fulfillment latency, paginated by source and destination chain and status",
@@ -136,62 +136,62 @@ func NewPromMetrics() Metrics {
 			Name:      "order_settlement_status_change_counter",
 			Help:      "numbers of order settlement status changes, paginated by source and destination chain, and status",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, settlementStatusLabel}),
-		fundRebalanceTransferStatusChange: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		fundRebalanceTransferStatusChange: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "funds_rebalance_transfer_status_change_counter",
 			Help:      "numbers of funds rebalance transfer status changes, paginated by source and destination chain, and status",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, transferStatusLabel}),
-		totalTransactionSubmitted: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		totalTransactionSubmitted: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "total_transactions_submitted_counter",
 			Help:      "number of transactions submitted, paginated by success status and source and destination chain id",
 		}, []string{successLabel, chainIDLabel, transactionTypeLabel}),
-		totalTransactionsVerified: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		totalTransactionsVerified: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "total_transactions_verified_counter",
 			Help:      "number of transactions verified, paginated by success status and chain id",
 		}, []string{successLabel, chainIDLabel}),
-		fillLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		fillLatency: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "latency_per_fill_seconds",
 			Help:      "latency from source transaction to fill completion, paginated by source and destination chain id (in seconds)",
 			Buckets:   []float64{1, 5, 10, 15, 20, 30, 40, 50, 60, 120, 300, 600},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, orderStatusLabel}),
-		settlementLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		settlementLatency: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "latency_per_settlement_minutes",
 			Help:      "latency from source transaction to fill completion, paginated by source and destination chain id (in minutes)",
 			Buckets:   []float64{1, 5, 15, 30, 60, 120, 180, 240, 300},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, settlementStatusLabel}),
-		hplMessageStatusChange: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		hplMessageStatusChange: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "hyperlane_message_status_change_counter",
 			Help:      "number of hyperlane messages status changes, paginated by source and destination chain, and message status",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, transferStatusLabel}),
 
-		hplCheckpointingErrors: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		hplCheckpointingErrors: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "hyperlane_checkpointing_errors",
 			Help:      "number of hyperlane checkpointing errors",
 		}, []string{}),
-		hplLatency: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		hplLatency: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "latency_per_hyperlane_message_seconds",
 			Help:      "latency for hyperlane message relaying, paginated by status, source and destination chain id (in seconds)",
 			Buckets:   []float64{1, 5, 10, 15, 20, 30, 40, 50, 60, 120, 300, 600},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel, transferStatusLabel}),
-		hplRelayTooExpensive: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		hplRelayTooExpensive: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "hyperlane_relay_too_expensive_counter",
 			Help:      "counter of relay attempts that were aborted due to being too expensive",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel}),
-		excessiveHyperlaneRelayLatency: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		excessiveHyperlaneRelayLatency: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "excessive_hyperlane_relay_latency_counter",
 			Help:      "number of observations of excessive hyperlane relay latency, paginated by source and destination chain",
 		}, []string{sourceChainIDLabel, destinationChainIDLabel}),
 
-		transferSizeOutOfRange: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		transferSizeOutOfRange: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "transfer_size_out_of_range",
 			Help:      "histogram of transfer sizes that were out of min/max fill size constraints",
@@ -206,13 +206,13 @@ func NewPromMetrics() Metrics {
 				1000000000000, // 1,000,000 USDC
 			},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel}),
-		feeBpsRejections: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		feeBpsRejections: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "fee_bps_rejections",
 			Help:      "histogram of fee bps that were rejected for being too low",
 			Buckets:   []float64{1, 5, 10, 25, 50, 100, 200, 500, 1000},
 		}, []string{sourceChainIDLabel, destinationChainIDLabel}),
-		insufficientBalanceErrors: kitprom.NewHistogramFrom(stdprom.HistogramOpts{
+		insufficientBalanceErrors: prom.NewHistogramFrom(stdprom.HistogramOpts{
 			Namespace: "solver",
 			Name:      "insufficient_balance_errors",
 			Help:      "histogram of fill orders that exceeded available balance",
@@ -224,37 +224,37 @@ func NewPromMetrics() Metrics {
 				1000000000000, // 1,000,000 USDC
 			},
 		}, []string{chainIDLabel}),
-		gasBalance: kitprom.NewGaugeFrom(stdprom.GaugeOpts{
+		gasBalance: prom.NewGaugeFrom(stdprom.GaugeOpts{
 			Namespace: "solver",
 			Name:      "gas_balance_gauge",
 			Help:      "gas balances, paginated by chain id",
 		}, []string{chainIDLabel, chainNameLabel, gasTokenSymbolLabel}),
-		gasBalanceState: kitprom.NewGaugeFrom(stdprom.GaugeOpts{
+		gasBalanceState: prom.NewGaugeFrom(stdprom.GaugeOpts{
 			Namespace: "solver",
 			Name:      "gas_balance_state_gauge",
 			Help:      "gas balance states (0=ok 1=warning 2=critical), paginated by chain id",
 		}, []string{chainIDLabel, chainNameLabel}),
 
 		// New WebSocket metrics using go-kit constructors
-		connectionType: kitprom.NewGaugeFrom(stdprom.GaugeOpts{
+		connectionType: prom.NewGaugeFrom(stdprom.GaugeOpts{
 			Namespace: "solver",
 			Name:      "chain_connection_type",
 			Help:      "Current connection type (0=RPC, 1=WebSocket) for each chain and monitor",
 		}, []string{"chain_id", "monitor"}),
 
-		blocksReceived: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		blocksReceived: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "websocket_blocks_received_total",
 			Help:      "Number of blocks received via WebSocket per chain and monitor",
 		}, []string{"chain_id", "monitor"}),
 
-		subscriptionErrors: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		subscriptionErrors: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "websocket_subscription_errors_total",
 			Help:      "Number of WebSocket subscription errors per chain, monitor, and error type",
 		}, []string{"chain_id", "monitor", "error_type"}),
 
-		connectionSwitches: kitprom.NewCounterFrom(stdprom.CounterOpts{
+		connectionSwitches: prom.NewCounterFrom(stdprom.CounterOpts{
 			Namespace: "solver",
 			Name:      "connection_type_switches_total",
 			Help:      "Number of switches between connection types per chain and monitor",

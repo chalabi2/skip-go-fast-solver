@@ -14,8 +14,8 @@ import (
 	"github.com/skip-mev/go-fast-solver/shared/lmt"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 type GasMonitor struct {
@@ -133,37 +133,37 @@ func (gm *GasMonitor) monitorChainWebSocket(ctx context.Context, chain config.Ch
 			// Expected for Cosmos chains or non-WebSocket clients
 			// Add metrics but keep existing logging
 			metrics.FromContext(ctx).SetConnectionType(chain.ChainID, "gas_monitor", metrics.ConnectionTypeRPC)
-			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
-			
+
 			lmt.Logger(ctx).Info("WebSocket not supported, falling back to RPC polling",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName),
 				zap.String("reason", "not supported"))
 			return gm.monitorChainRPC(ctx, chain)
-			
+
 		case strings.Contains(err.Error(), "notifications not supported"):
 			// RPC endpoint doesn't support WebSocket
 			// Add metrics but keep existing logging
 			metrics.FromContext(ctx).SetConnectionType(chain.ChainID, "gas_monitor", metrics.ConnectionTypeRPC)
 			metrics.FromContext(ctx).RecordSubscriptionError(chain.ChainID, "gas_monitor", "notifications_not_supported")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
-			
+
 			lmt.Logger(ctx).Info("WebSocket notifications not supported, falling back to RPC polling",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName),
 				zap.String("reason", "notifications not supported"))
 			return gm.monitorChainRPC(ctx, chain)
-			
+
 		default:
 			// Unexpected error
 			// Add metrics but keep existing logging
 			metrics.FromContext(ctx).SetConnectionType(chain.ChainID, "gas_monitor", metrics.ConnectionTypeRPC)
 			metrics.FromContext(ctx).RecordSubscriptionError(chain.ChainID, "gas_monitor", "unexpected_error")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
-			
+
 			lmt.Logger(ctx).Error("WebSocket subscription failed",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName),
@@ -174,35 +174,40 @@ func (gm *GasMonitor) monitorChainWebSocket(ctx context.Context, chain config.Ch
 
 	// Add metric for successful WebSocket connection
 	metrics.FromContext(ctx).SetConnectionType(chain.ChainID, "gas_monitor", metrics.ConnectionTypeWebSocket)
-	
+
 	lmt.Logger(ctx).Info("Successfully established WebSocket connection",
 		zap.String("chain_id", chain.ChainID),
 		zap.String("chain_name", chain.ChainName))
 
-	blockCount := 0
 	for {
 		select {
 		case <-ctx.Done():
+			// Properly clean up WebSocket resources
+			sub.Unsubscribe()
+			wsClient.Close()
+			lmt.Logger(ctx).Info("WebSocket subscription unsubscribed and connection closed",
+				zap.String("chain_id", chain.ChainID),
+				zap.String("chain_name", chain.ChainName))
 			return nil
 		case err := <-sub.Err():
 			// Add metrics but keep existing logging
 			metrics.FromContext(ctx).RecordSubscriptionError(chain.ChainID, "gas_monitor", "subscription_error")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chain.ChainID, "gas_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
-			
+
 			lmt.Logger(ctx).Error("WebSocket subscription error, falling back to RPC polling",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName),
 				zap.Error(err))
 			return gm.monitorChainRPC(ctx, chain)
 		case _ = <-headers:
-			blockCount++
+
 			metrics.FromContext(ctx).IncrementBlocksReceived(chain.ChainID, "gas_monitor")
 
 			// Use ClientManager instead of creating new EVMBridgeClient
 			client, err := gm.clientManager.GetClient(ctx, chain.ChainID)
 			if err != nil {
-				lmt.Logger(ctx).Error("failed to get client", 
+				lmt.Logger(ctx).Error("failed to get client",
 					zap.String("chain_id", chain.ChainID),
 					zap.Error(err))
 				continue
@@ -239,12 +244,11 @@ func (gm *GasMonitor) monitorChainRPC(ctx context.Context, chain config.ChainCon
 	}
 }
 
-
 var (
-	lastLowBalanceAlert = make(map[string]time.Time)
-	lastBalanceCheck    = make(map[string]time.Time)
-	lowBalanceAlertCooldown = 1 * time.Hour   
-	balanceCheckCooldown   = 1 * time.Hour  
+	lastLowBalanceAlert     = make(map[string]time.Time)
+	lastBalanceCheck        = make(map[string]time.Time)
+	lowBalanceAlertCooldown = 1 * time.Hour
+	balanceCheckCooldown    = 1 * time.Hour
 )
 
 // monitorGasBalance exports a metric indicating the current gas balance of the relayer signer and whether it is below alerting thresholds
@@ -254,10 +258,10 @@ func monitorGasBalance(ctx context.Context, chainID string, chainClient cctp.Bri
 	if exists && time.Since(lastCheck) < balanceCheckCooldown {
 		return nil // Skip checking balance during cooldown period
 	}
-	
+
 	balance, err := chainClient.SignerGasTokenBalance(ctx)
 	lastBalanceCheck[chainID] = time.Now() // Update last check time
-	
+
 	if err != nil {
 		lmt.Logger(ctx).Error("failed to get gas token balance", zap.Error(err), zap.String("chain_id", chainID))
 		return err

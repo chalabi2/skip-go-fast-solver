@@ -418,19 +418,19 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 
 	wsClient, err := t.getWebSocketClient(ctx, chain)
 	if err != nil {
-		if strings.Contains(err.Error(), "dial tcp") || 
-		   strings.Contains(err.Error(), "not supported") {
+		if strings.Contains(err.Error(), "dial tcp") ||
+			strings.Contains(err.Error(), "not supported") {
 			// Add metrics alongside existing logging
 			metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
 			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "connection_failed")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
 
 			lmt.Logger(ctx).Info("WebSocket connection failed, falling back to RPC polling",
 				zap.String("chain_id", chainID),
 				zap.String("chain_name", chain.ChainName),
 				zap.Error(err))
-			
+
 			return nil
 		}
 		return fmt.Errorf("error getting websocket client: %w", err)
@@ -442,7 +442,7 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 		// Add metrics alongside existing logging
 		metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
 		metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "subscription_failed")
-		metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+		metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
 			metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
 
 		lmt.Logger(ctx).Info("WebSocket subscription failed, falling back to RPC polling",
@@ -465,13 +465,12 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 		lastProcessedHeight = uint64(transferMonitorMetadata.HeightLastSeen)
 	}
 
-	blockCount := 0
 	for {
 		select {
 		case err := <-sub.Err():
 			// Add metrics alongside existing logging
 			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "subscription_error")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor", 
+			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
 
 			return fmt.Errorf("subscription error: %w", err)
@@ -480,7 +479,6 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 				continue
 			}
 
-			blockCount++
 			metrics.FromContext(ctx).IncrementBlocksReceived(chainID, "transfer_monitor")
 
 			orders, endBlockHeight, err := t.findNewTransferIntentsOnEVMChain(ctx, chain, lastProcessedHeight+1)
@@ -551,11 +549,11 @@ func (t *TransferMonitor) getWebSocketClient(ctx context.Context, chain config.C
 	if err != nil {
 		return nil, err
 	}
-	
+
 	lmt.Logger(ctx).Info("Initializing WebSocket connection",
 		zap.String("chain_id", chain.ChainID),
 		zap.String("ws_endpoint", wsEndpoint))
-	
+
 	if client, ok := t.wsClients[chain.ChainID]; ok {
 		return client, nil
 	}
