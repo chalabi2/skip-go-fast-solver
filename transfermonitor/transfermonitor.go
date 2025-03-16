@@ -463,6 +463,34 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 	transferMonitorMetadata, err := t.db.GetTransferMonitorMetadata(ctx, chainID)
 	if err == nil {
 		lastProcessedHeight = uint64(transferMonitorMetadata.HeightLastSeen)
+	} else if !strings.Contains(err.Error(), "no rows in result set") {
+		// Only log as error if it's not simply a "no rows" error
+		lmt.Logger(ctx).Error("Error retrieving transfer monitor metadata",
+			zap.String("chain_id", chainID),
+			zap.Error(err))
+
+		// If we have a quick start configuration, we might want to use that instead
+		if t.quickStart && !t.didQuickStart[chainID] {
+			latestBlock, latestErr := t.getLatestBlockHeight(ctx, chain)
+			if latestErr != nil {
+				lmt.Logger(ctx).Error("Failed to get latest block height for quick start fallback",
+					zap.String("chain_id", chainID),
+					zap.Error(latestErr))
+			} else {
+				quickStartBlockHeight := latestBlock - chain.QuickStartNumBlocksBack
+				lastProcessedHeight = quickStartBlockHeight
+				lmt.Logger(ctx).Info("Using quick start block height due to metadata error",
+					zap.String("chain_id", chainID),
+					zap.Uint64("quick_start_height", quickStartBlockHeight))
+
+				// Mark this chain as having been quickstarted
+				t.didQuickStart[chainID] = true
+			}
+		}
+	} else {
+		// No rows found, this is the first time processing this chain
+		lmt.Logger(ctx).Info("No existing metadata found, starting from height 0",
+			zap.String("chain_id", chainID))
 	}
 
 	for {
@@ -473,7 +501,11 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
 				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
 
-			return fmt.Errorf("subscription error: %w", err)
+			lmt.Logger(ctx).Error("WebSocket subscription error",
+				zap.String("chain_id", chainID),
+				zap.String("chain_name", chain.ChainName),
+				zap.Error(err))
+			return fmt.Errorf("subscription error for chain %s: %w", chainID, err)
 		case header := <-headers:
 			if header.Number.Uint64() <= lastProcessedHeight {
 				continue
@@ -483,21 +515,31 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 
 			orders, endBlockHeight, err := t.findNewTransferIntentsOnEVMChain(ctx, chain, lastProcessedHeight+1)
 			if err != nil {
-				lmt.Logger(ctx).Error("Error finding transfer intents", zap.Error(err))
+				lmt.Logger(ctx).Error("Error finding transfer intents",
+					zap.String("chain_id", chainID),
+					zap.Uint64("start_height", lastProcessedHeight+1),
+					zap.Error(err))
+
+				// Check if context is canceled to avoid unnecessary retries
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				continue
 			}
 
 			if len(orders) > 0 {
 				lmt.Logger(ctx).Info("Found transfer intents via WebSocket",
 					zap.Int("count", len(orders)),
-					zap.String("chain_id", chainID))
+					zap.String("chain_id", chainID),
+					zap.Uint64("start_height", lastProcessedHeight+1),
+					zap.Uint64("end_height", endBlockHeight))
 
-				errorInsertingOrder := false
+				errorCount := 0
 				for _, order := range orders {
 					toInsert := db.InsertOrderParams{
 						SourceChainID:                     order.ChainID,
 						DestinationChainID:                order.DestinationChainID,
-						SourceChainGatewayContractAddress: order.ChainID,
+						SourceChainGatewayContractAddress: chain.FastTransferContractAddress, // Fix: using proper contract address instead of chainID
 						Sender:                            order.OrderEvent.Sender[:],
 						Recipient:                         order.OrderEvent.Recipient[:],
 						AmountIn:                          order.OrderEvent.AmountIn.String(),
@@ -514,29 +556,62 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 					}
 
 					_, err := t.db.InsertOrder(ctx, toInsert)
-					if err != nil && !strings.Contains(err.Error(), "sql: no rows in result set") {
+					if err != nil {
+						if strings.Contains(err.Error(), "sql: no rows in result set") {
+							// This is expected in some cases, just continue
+							continue
+						}
 
-						lmt.Logger(ctx).Error("Error inserting order", zap.Error(err))
-						errorInsertingOrder = true
-						break
+						if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") {
+							// Log at debug level for duplicates
+							lmt.Logger(ctx).Debug("Skipping duplicate order",
+								zap.String("order_id", order.OrderID),
+								zap.String("chain_id", chainID))
+							continue
+						}
+
+						// Real error
+						lmt.Logger(ctx).Error("Error inserting order",
+							zap.String("order_id", order.OrderID),
+							zap.String("chain_id", chainID),
+							zap.Error(err))
+
+						errorCount++
+						if errorCount >= 3 {
+							// If we hit too many errors, break out but continue processing
+							lmt.Logger(ctx).Warn("Too many errors inserting orders, skipping remaining orders in batch",
+								zap.String("chain_id", chainID),
+								zap.Int("error_count", errorCount),
+								zap.Int("total_orders", len(orders)))
+							break
+						}
+						continue
 					}
+
 					metrics.FromContext(ctx).IncFillOrderStatusChange(order.ChainID, order.DestinationChainID, dbtypes.OrderStatusPending)
 				}
-				if errorInsertingOrder {
-					continue
-				}
+
+				// Don't stop processing just because we had some insert errors
+				// We'll still update the metadata and continue with the next block
 			}
 
+			// Always try to update metadata even if there were some errors
 			_, err = t.db.InsertTransferMonitorMetadata(ctx, db.InsertTransferMonitorMetadataParams{
 				ChainID:        chainID,
 				HeightLastSeen: int64(endBlockHeight),
 			})
 			if err != nil {
-				lmt.Logger(ctx).Error("Error inserting transfer monitor metadata", zap.Error(err))
-				continue
+				lmt.Logger(ctx).Error("Error inserting transfer monitor metadata",
+					zap.String("chain_id", chainID),
+					zap.Uint64("height", endBlockHeight),
+					zap.Error(err))
+				// Continue processing even if metadata update fails
+			} else {
+				lastProcessedHeight = endBlockHeight
+				lmt.Logger(ctx).Debug("Updated last processed height",
+					zap.String("chain_id", chainID),
+					zap.Uint64("height", endBlockHeight))
 			}
-
-			lastProcessedHeight = endBlockHeight
 
 		case <-ctx.Done():
 			sub.Unsubscribe()
@@ -544,7 +619,6 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 			lmt.Logger(ctx).Info("WebSocket subscription unsubscribed and connection closed",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName))
-			return nil
 			return nil
 		}
 	}
