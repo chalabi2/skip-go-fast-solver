@@ -441,8 +441,44 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 	// Create client for contract interaction
 	ethClient := ethclient.NewClient(wsClient)
 
-	// Create filter query for OrderSubmitted events
+	// Create contract instance once outside the event loop
 	contractAddress := common.HexToAddress(chain.FastTransferContractAddress)
+	fastTransferGateway, err := fast_transfer_gateway.NewFastTransferGateway(
+		contractAddress,
+		ethClient,
+	)
+	if err != nil {
+		lmt.Logger(ctx).Error("Error creating contract instance",
+			zap.String("chain_id", chainID),
+			zap.Error(err))
+		wsClient.Close()
+		return fmt.Errorf("error creating contract instance: %w", err)
+	}
+
+	// Subscribe to new heads to track latest block height
+	headers := make(chan *types.Header)
+	headsSub, err := ethClient.SubscribeNewHead(ctx, headers)
+	if err != nil {
+		lmt.Logger(ctx).Error("Error subscribing to new block headers",
+			zap.String("chain_id", chainID),
+			zap.Error(err))
+		wsClient.Close()
+		return fmt.Errorf("error subscribing to block headers: %w", err)
+	}
+
+	// Get initial block height
+	var latestBlockHeight uint64
+	var lastProcessedHeight uint64
+	transferMonitorMetadata, err := t.db.GetTransferMonitorMetadata(ctx, chainID)
+	if err == nil {
+		lastProcessedHeight = uint64(transferMonitorMetadata.HeightLastSeen)
+	} else if !strings.Contains(err.Error(), "no rows in result set") {
+		lmt.Logger(ctx).Error("Error retrieving transfer monitor metadata",
+			zap.String("chain_id", chainID),
+			zap.Error(err))
+	}
+
+	// Subscribe to contract events
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{contractAddress},
 		Topics: [][]common.Hash{{
@@ -452,7 +488,7 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 
 	// Subscribe to event logs
 	logs := make(chan types.Log)
-	sub, err := ethClient.SubscribeFilterLogs(ctx, query, logs)
+	eventsSub, err := ethClient.SubscribeFilterLogs(ctx, query, logs)
 	if err != nil {
 		// Add metrics alongside existing logging
 		metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeRPC)
@@ -464,47 +500,77 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 			zap.String("chain_id", chainID),
 			zap.String("chain_name", chain.ChainName),
 			zap.Error(err))
+		headsSub.Unsubscribe()
+		wsClient.Close()
 		return nil
 	}
 
 	// Add metric for successful connection
 	metrics.FromContext(ctx).SetConnectionType(chainID, "transfer_monitor", metrics.ConnectionTypeWebSocket)
 
-	lmt.Logger(ctx).Info("Successfully established WebSocket connection for OrderSubmitted events",
+	lmt.Logger(ctx).Info("Successfully established WebSocket connections",
 		zap.String("chain_id", chainID),
 		zap.String("chain_name", chain.ChainName),
 		zap.String("contract_address", chain.FastTransferContractAddress))
 
 	for {
 		select {
-		case err := <-sub.Err():
-			// Add metrics alongside existing logging
-			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "subscription_error")
-			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
-				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
-
-			lmt.Logger(ctx).Error("WebSocket subscription error",
+		case err := <-headsSub.Err():
+			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "headers_subscription_error")
+			lmt.Logger(ctx).Error("WebSocket headers subscription error",
 				zap.String("chain_id", chainID),
 				zap.String("chain_name", chain.ChainName),
 				zap.Error(err))
-			return fmt.Errorf("subscription error for chain %s: %w", chainID, err)
+			eventsSub.Unsubscribe()
+			wsClient.Close()
+			return fmt.Errorf("headers subscription error for chain %s: %w", chainID, err)
+
+		case header := <-headers:
+			// Update latest block height from the websocket data
+			latestBlockHeight = header.Number.Uint64()
+			metrics.FromContext(ctx).IncrementBlocksReceived(chainID, "transfer_monitor")
+
+			// Periodically update the metadata with the latest processed height
+			if latestBlockHeight > lastProcessedHeight {
+				// Only update periodically (e.g., every 100 blocks or after processing events)
+				if latestBlockHeight-lastProcessedHeight >= 100 {
+					_, err = t.db.InsertTransferMonitorMetadata(ctx, db.InsertTransferMonitorMetadataParams{
+						ChainID:        chainID,
+						HeightLastSeen: int64(latestBlockHeight),
+					})
+					if err != nil {
+						lmt.Logger(ctx).Error("Error updating transfer monitor metadata",
+							zap.String("chain_id", chainID),
+							zap.Uint64("height", latestBlockHeight),
+							zap.Error(err))
+					} else {
+						lastProcessedHeight = latestBlockHeight
+						lmt.Logger(ctx).Debug("Updated last processed height from new block headers",
+							zap.String("chain_id", chainID),
+							zap.Uint64("height", latestBlockHeight))
+					}
+				}
+			}
+
+		case err := <-eventsSub.Err():
+			// Add metrics alongside existing logging
+			metrics.FromContext(ctx).RecordSubscriptionError(chainID, "transfer_monitor", "events_subscription_error")
+			metrics.FromContext(ctx).RecordConnectionSwitch(chainID, "transfer_monitor",
+				metrics.ConnectionTypeWebSocket, metrics.ConnectionTypeRPC)
+
+			lmt.Logger(ctx).Error("WebSocket events subscription error",
+				zap.String("chain_id", chainID),
+				zap.String("chain_name", chain.ChainName),
+				zap.Error(err))
+			headsSub.Unsubscribe()
+			wsClient.Close()
+			return fmt.Errorf("events subscription error for chain %s: %w", chainID, err)
+
 		case vLog := <-logs:
 			// Process the log event
 			metrics.FromContext(ctx).IncrementBlocksReceived(chainID, "transfer_monitor")
 
-			// Create contract instance for parsing the log
-			fastTransferGateway, err := fast_transfer_gateway.NewFastTransferGateway(
-				contractAddress,
-				ethClient,
-			)
-			if err != nil {
-				lmt.Logger(ctx).Error("Error creating contract instance",
-					zap.String("chain_id", chainID),
-					zap.Error(err))
-				continue
-			}
-
-			// Parse the log to get OrderSubmitted event data
+			// Use the pre-created contract instance instead of creating a new one for each event
 			event, err := fastTransferGateway.ParseOrderSubmitted(vLog)
 			if err != nil {
 				lmt.Logger(ctx).Error("Error parsing OrderSubmitted event",
@@ -570,16 +636,34 @@ func (t *TransferMonitor) startWebSocketMonitor(ctx context.Context, chain confi
 				continue
 			}
 
+			// Also update the last processed height after processing an event
+			if vLog.BlockNumber > lastProcessedHeight {
+				_, err = t.db.InsertTransferMonitorMetadata(ctx, db.InsertTransferMonitorMetadataParams{
+					ChainID:        chainID,
+					HeightLastSeen: int64(vLog.BlockNumber),
+				})
+				if err != nil {
+					lmt.Logger(ctx).Error("Error updating transfer monitor metadata after event",
+						zap.String("chain_id", chainID),
+						zap.Uint64("height", vLog.BlockNumber),
+						zap.Error(err))
+				} else {
+					lastProcessedHeight = vLog.BlockNumber
+				}
+			}
+
 			metrics.FromContext(ctx).IncFillOrderStatusChange(order.ChainID, order.DestinationChainID, dbtypes.OrderStatusPending)
 
 			lmt.Logger(ctx).Info("Processed order from WebSocket subscription",
 				zap.String("chain_id", chainID),
 				zap.String("order_id", order.OrderID),
 				zap.Uint64("block_number", vLog.BlockNumber))
+
 		case <-ctx.Done():
-			sub.Unsubscribe()
+			headsSub.Unsubscribe()
+			eventsSub.Unsubscribe()
 			wsClient.Close()
-			lmt.Logger(ctx).Info("WebSocket subscription unsubscribed and connection closed",
+			lmt.Logger(ctx).Info("WebSocket subscriptions unsubscribed and connection closed",
 				zap.String("chain_id", chain.ChainID),
 				zap.String("chain_name", chain.ChainName))
 			return nil
